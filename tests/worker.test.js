@@ -24,6 +24,20 @@ function makeKv(seed, options) {
   };
 }
 
+function makeLimiter(decision) {
+  return {
+    getByName(name) {
+      assert.equal(name, "anidoa-global-translation-budget-v1");
+      return {
+        async checkAndIncrement() {
+          if (decision instanceof Error) throw decision;
+          return decision || { allowed: true };
+        },
+      };
+    },
+  };
+}
+
 function jsonRequest(url, method, body, headers) {
   return new Request(url, {
     method: method || "POST",
@@ -38,6 +52,7 @@ const VIDEO_ID = "dQw4w9WgXcQ";
 test("health reports not-ready when required secrets are missing", async () => {
   const env = {
     ANIDOA_KV: makeKv(),
+    ANIDOA_RATE_LIMITER: makeLimiter(),
   };
   const response = await worker.fetch(new Request("https://anidoa.test/api/health"), env);
   const body = await response.json();
@@ -59,6 +74,7 @@ test("health reports ready only when KV and all required secrets are configured"
     YOUTUBE_API_KEY: "not-a-real-key",
     GEMINI_API_KEY: "not-a-real-key",
     ADMIN_SECRET: "test-only-secret",
+    ANIDOA_RATE_LIMITER: makeLimiter(),
   };
   const response = await worker.fetch(new Request("https://anidoa.test/api/health"), env);
   const body = await response.json();
@@ -163,16 +179,16 @@ test("manual translation reuses a saved result without another Gemini call", asy
   }
 });
 
-test("translation fails closed when KV rate-limit storage is unavailable", async () => {
+test("translation fails closed when the Durable Object rate limiter is unavailable", async () => {
   const series = {
     playlistId: PLAYLIST_ID,
     episodes: [{ videoId: VIDEO_ID, title: "Episode one" }],
   };
   const env = {
-    ANIDOA_KV: makeKv(
-      { ["playlist:" + PLAYLIST_ID]: JSON.stringify(series) },
-      { failRateLimitReads: true }
-    ),
+    ANIDOA_KV: makeKv({
+      ["playlist:" + PLAYLIST_ID]: JSON.stringify(series),
+    }),
+    ANIDOA_RATE_LIMITER: makeLimiter(new Error("Durable Object unavailable")),
     GEMINI_API_KEY: "not-a-real-key",
   };
   const originalFetch = globalThis.fetch;
