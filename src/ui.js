@@ -354,6 +354,9 @@ export function renderWatchPage(series, episode, episodes) {
     '<input class="file-input" id="srtFile" type="file" accept=".srt,.vtt,text/plain"></div>' +
     '<div class="field"><label for="srtText">أو الصق نص الترجمة هنا</label>' +
     '<textarea id="srtText" dir="ltr" placeholder="1&#10;00:00:01,000 --> 00:00:03,000&#10;Hello world..."></textarea></div>' +
+    '<div class="field"><label for="manualAdminSecret">كلمة سر المدير لتشغيل الترجمة اليدوية</label>' +
+    '<input id="manualAdminSecret" type="password" autocomplete="current-password" placeholder="أدخل كلمة سر المدير"></div>' +
+    '<p class="hint">الترجمة اليدوية متاحة للمدير فقط لحماية رصيد الترجمة من الاستخدام العشوائي.</p>' +
     '<button class="btn secondary" type="button" id="manualBtn">ترجم الآن</button>' +
     "</div>" +
     '<section class="episodes"><h2>كل الحلقات (' + eps.length + ")</h2>" +
@@ -417,8 +420,13 @@ export function renderWatchPage(series, episode, episodes) {
     "}\n" +
     "function currentCueText(time) {\n" +
     "  var t = time + prefs.offset;\n" +
-    "  for (var i = 0; i < subtitles.length; i++) {\n" +
-    "    if (t >= subtitles[i].start && t <= subtitles[i].end) return subtitles[i].text;\n" +
+    "  var low = 0, high = subtitles.length - 1;\n" +
+    "  while (low <= high) {\n" +
+    "    var mid = (low + high) >> 1;\n" +
+    "    var cue = subtitles[mid];\n" +
+    "    if (t < cue.start) high = mid - 1;\n" +
+    "    else if (t > cue.end) low = mid + 1;\n" +
+    "    else return cue.text;\n" +
     "  }\n" +
     "  return '';\n" +
     "}\n" +
@@ -438,7 +446,7 @@ export function renderWatchPage(series, episode, episodes) {
     "  document.getElementById('manualBox').style.display = 'none';\n" +
     "  subtitles = [];\n" +
     "  try {\n" +
-    "    var res = await fetch('/api/subtitles?videoId=' + encodeURIComponent(CURRENT_VIDEO_ID));\n" +
+    "    var res = await fetch('/api/subtitles?playlistId=' + encodeURIComponent(PLAYLIST_ID) + '&videoId=' + encodeURIComponent(CURRENT_VIDEO_ID));\n" +
     "    var data = await res.json().catch(function () { return {}; });\n" +
     "    if (res.status === 404 && data && data.code === 'NO_SUBTITLES') {\n" +
     "      showStatus('هذه الحلقة بدون ترجمة إنجليزية — قد تكون مترجمة داخل الفيديو (Hardsub). يمكنك رفع ملف ترجمة بالأسفل.', 'info', false);\n" +
@@ -494,15 +502,17 @@ export function renderWatchPage(series, episode, episodes) {
     "  var btn = document.getElementById('manualBtn');\n" +
     "  var alertEl = document.getElementById('manualAlert');\n" +
     "  var text = document.getElementById('srtText').value.trim();\n" +
+    "  var adminSecret = document.getElementById('manualAdminSecret').value;\n" +
+    "  if (!adminSecret) { alertEl.textContent = 'أدخل كلمة سر المدير أولاً لحماية رصيد الترجمة.'; alertEl.className = 'alert show error'; return; }\n" +
     "  if (!text || text.length < 10) { alertEl.textContent = 'الصق نص ترجمة كاملاً أو ارفع ملف .srt أولاً.'; alertEl.className = 'alert show error'; return; }\n" +
     "  btn.disabled = true; btn.textContent = 'جارٍ ترجمة الملف...';\n" +
     "  alertEl.textContent = 'جارٍ ترجمة الملف بالذكاء الاصطناعي — قد يستغرق هذا دقيقة.'; alertEl.className = 'alert show info';\n" +
     "  try {\n" +
-    "    var res = await fetch('/api/translate-manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ videoId: CURRENT_VIDEO_ID, srtText: text }) });\n" +
+    "    var res = await fetch('/api/translate-manual', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-secret': adminSecret }, body: JSON.stringify({ playlistId: PLAYLIST_ID, videoId: CURRENT_VIDEO_ID, srtText: text }) });\n" +
     "    var data = await res.json().catch(function () { return {}; });\n" +
     "    if (!res.ok) throw new Error(data.error || 'فشلت ترجمة الملف.');\n" +
     "    subtitles = Array.isArray(data.subtitles) ? data.subtitles : [];\n" +
-    "    alertEl.textContent = 'تمت ترجمة الملف بنجاح (' + subtitles.length + ' سطراً).'; alertEl.className = 'alert show success';\n" +
+    "    alertEl.textContent = data.cached ? 'تم تحميل الترجمة المحفوظة بالفعل (' + subtitles.length + ' سطراً).' : 'تمت ترجمة الملف بنجاح (' + subtitles.length + ' سطراً).'; alertEl.className = 'alert show success';\n" +
     "    showStatus('تمت ترجمة الملف المرفوع بنجاح.', 'success', false);\n" +
     "  } catch (err) {\n" +
     "    alertEl.textContent = err.message || 'فشلت ترجمة الملف.'; alertEl.className = 'alert show error';\n" +

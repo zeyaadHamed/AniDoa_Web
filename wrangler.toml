@@ -18,15 +18,25 @@
 
 name = "anidoa"
 main = "src/index.js"
-compatibility_date = "2024-10-01"
+compatibility_date = "2026-11-23"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 # ربط Cloudflare KV — استبدل القيمتين بالـ IDs الحقيقية من Dashboard
 [[kv_namespaces]]
 binding = "ANIDOA_KV"
-id = "REPLACE_WITH_KV_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
+id = "fd214f6dcf44cfba0bb6a11df9abc16"
+preview_id = "fd214f6dcf44cfba0bb6a11df9abc16"
+
+# حد تقريبي لحماية استدعاءات Gemini من الاستخدام المتكرر.
+# غيّر namespace_id إلى رقم موجب آخر إذا كان مستخدماً بالفعل في حسابك.
+[[ratelimits]]
+name = "ANIDOA_TRANSLATE_LIMITER"
+namespace_id = "73110429"
+
+  [ratelimits.simple]
+  limit = 5
+  period = 60
 
 [vars]
 # لا تضع المفاتيح السرية هنا أبداً — ضعها كـ Secrets من Dashboard.

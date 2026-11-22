@@ -1,6 +1,6 @@
 /**
  * AniDoa — translator.js
- * محرك الترجمة الذكي عبر Google Gemini 2.5 Flash.
+ * محرك الترجمة الذكي عبر Google Gemini 3.5 Flash-Lite.
  *
  * - تقسيم الترجمة إلى دفعات (Chunks) كل دفعة 50 سطراً
  * - Context Overlap: آخر سطرين من الدفعة السابقة كسياق فقط
@@ -9,7 +9,7 @@
  * - مخرجات JSON نظيفة فقط مع تحقق وإعادة محاولة
  */
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.5-flash-lite";
 const CHUNK_SIZE = 50;
 const CONTEXT_OVERLAP = 2;
 const REQUEST_TIMEOUT_MS = 30000;
@@ -127,7 +127,7 @@ export function buildPrompt(chunk, contextCues) {
 }
 
 /**
- * استدعاء Gemini مع مهلة و إعادة محاولة واحدة عند 429.
+ * استدعاء Gemini مع مهلة وإعادة محاولة واحدة للأخطاء العابرة.
  */
 async function callGemini(prompt, apiKey) {
   const url =
@@ -138,8 +138,6 @@ async function callGemini(prompt, apiKey) {
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
-      temperature: 0.2,
-      topP: 0.9,
       maxOutputTokens: 8192,
       responseMimeType: "application/json",
     },
@@ -162,9 +160,16 @@ async function callGemini(prompt, apiKey) {
   }
 
   let response = await doRequest();
-  if (response.status === 429) {
-    console.error("[AniDoa] Gemini 429 — retrying after 5s");
-    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+  if ([429, 500, 502, 503, 504].includes(response.status)) {
+    const retryAfterSeconds = Number(response.headers.get("retry-after") || 0);
+    const waitMs =
+      Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? Math.min(retryAfterSeconds * 1000, 15000)
+        : RETRY_DELAY_MS;
+    console.warn(
+      "[AniDoa] Gemini temporary HTTP " + response.status + " — retrying after " + waitMs + "ms"
+    );
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
     response = await doRequest();
   }
   if (!response.ok) {
@@ -172,11 +177,17 @@ async function callGemini(prompt, apiKey) {
     if (response.status === 429) {
       throw new Error("تجاوزت حد طلبات Gemini مؤقتاً (Rate Limit). حاول مرة أخرى بعد قليل.");
     }
+    if (response.status === 503 || response.status === 500 || response.status === 502 || response.status === 504) {
+      throw new Error("خدمة Gemini مشغولة مؤقتاً. حاول مرة أخرى بعد دقيقة.");
+    }
     if (response.status === 400) {
       throw new Error("طلب ترجمة غير صالح (Gemini 400). تحقق من مفتاح GEMINI_API_KEY.");
     }
     if (response.status === 401 || response.status === 403) {
       throw new Error("مفتاح Gemini غير صالح أو بلا صلاحية. تحقق من GEMINI_API_KEY.");
+    }
+    if (response.status === 404) {
+      throw new Error("نموذج الترجمة غير متاح لهذا المفتاح أو المشروع. راجع إعدادات Gemini API.");
     }
     throw new Error("فشلت الترجمة عبر Gemini (HTTP " + response.status + "). " + errorText.slice(0, 200));
   }
