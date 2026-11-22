@@ -19,11 +19,22 @@ import { renderHome, renderWatchPage, renderErrorPage } from "./ui.js";
 
 const YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3";
 const MAX_MANUAL_TEXT_BYTES = 500 * 1024;
+const MAX_MANUAL_REQUEST_BYTES = MAX_MANUAL_TEXT_BYTES + 16 * 1024;
+
+function securityHeaders() {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  };
+}
 
 function jsonResponse(data, status) {
   return new Response(JSON.stringify(data), {
     status: status || 200,
     headers: {
+      ...securityHeaders(),
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
     },
@@ -40,6 +51,7 @@ function htmlResponse(html, status) {
   return new Response(html, {
     status: status || 200,
     headers: {
+      ...securityHeaders(),
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
     },
@@ -91,6 +103,33 @@ function isValidVideoId(videoId) {
   return typeof videoId === "string" && /^[A-Za-z0-9_-]{11}$/.test(videoId);
 }
 
+function isValidPlaylistId(playlistId) {
+  return typeof playlistId === "string" && /^[A-Za-z0-9_-]{10,128}$/.test(playlistId);
+}
+
+async function checkTranslationRateLimit(request, env, routeKey) {
+  // Local development may not have the Cloudflare Rate Limiting binding.
+  if (!env || !env.ANIDOA_TRANSLATE_LIMITER) return null;
+
+  const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  try {
+    const result = await env.ANIDOA_TRANSLATE_LIMITER.limit({
+      key: routeKey + ":" + clientIp,
+    });
+    if (!result.success) {
+      return errorResponse(
+        "وصلت إلى الحد المؤقت لطلبات الترجمة. انتظر دقيقة ثم حاول مرة أخرى.",
+        429,
+        { code: "RATE_LIMITED" }
+      );
+    }
+    return null;
+  } catch (e) {
+    console.error("[AniDoa] Rate limiter failed:", e && e.message);
+    return errorResponse("تعذّر التحقق من حد الطلبات حالياً. حاول بعد قليل.", 503);
+  }
+}
+
 async function kvGetJson(env, key) {
   if (!env || !env.ANIDOA_KV) return null;
   try {
@@ -123,6 +162,16 @@ async function listSeriesIndex(env) {
 
 async function saveSeriesIndex(env, index) {
   await kvPutJson(env, "series:index", index);
+}
+
+async function isApprovedEpisode(env, playlistId, videoId) {
+  if (!isValidPlaylistId(playlistId) || !isValidVideoId(videoId)) return false;
+  const series = await kvGetJson(env, "playlist:" + playlistId);
+  return !!(
+    series &&
+    Array.isArray(series.episodes) &&
+    series.episodes.some((episode) => episode && episode.videoId === videoId)
+  );
 }
 
 /**
@@ -288,9 +337,15 @@ async function handleDeleteSeries(request, env, url) {
 }
 
 async function handleGetSubtitles(request, env, url) {
+  const playlistId = url.searchParams.get("playlistId");
   const videoId = url.searchParams.get("videoId");
-  if (!isValidVideoId(videoId)) {
-    return errorResponse("معرّف الفيديو غير صالح.", 400);
+  if (!isValidPlaylistId(playlistId) || !isValidVideoId(videoId)) {
+    return errorResponse("رابط المسلسل أو معرّف الحلقة غير صالح.", 400);
+  }
+  if (!(await isApprovedEpisode(env, playlistId, videoId))) {
+    return errorResponse("هذه الحلقة غير موجودة ضمن مسلسلات AniDoa المعتمدة.", 404, {
+      code: "EPISODE_NOT_FOUND",
+    });
   }
   const cached = await kvGetJson(env, "sub:" + videoId);
   if (cached && Array.isArray(cached.subtitles) && cached.subtitles.length > 0) {
@@ -302,6 +357,9 @@ async function handleGetSubtitles(request, env, url) {
       subtitles: cached.subtitles,
     });
   }
+  const rateLimitResponse = await checkTranslationRateLimit(request, env, "subtitles");
+  if (rateLimitResponse) return rateLimitResponse;
+
   let english;
   try {
     english = await getEnglishSubtitles(videoId, env);
@@ -338,23 +396,61 @@ async function handleGetSubtitles(request, env, url) {
 }
 
 async function handleTranslateManual(request, env) {
+  const admin = requireAdmin(request, env, null);
+  if (!admin.ok) return errorResponse(admin.error, 401);
+
+  const contentLength = Number(request.headers.get("content-length") || 0);
+  if (contentLength > MAX_MANUAL_REQUEST_BYTES) {
+    return errorResponse("الطلب أكبر من الحد المسموح (500KB للترجمة).", 413);
+  }
+
+  let rawBody;
+  try {
+    rawBody = await request.text();
+  } catch (e) {
+    return errorResponse("تعذّر قراءة بيانات الطلب.", 400);
+  }
+  if (new TextEncoder().encode(rawBody).length > MAX_MANUAL_REQUEST_BYTES) {
+    return errorResponse("الطلب أكبر من الحد المسموح (500KB للترجمة).", 413);
+  }
+
   let body;
   try {
-    body = await request.json();
+    body = JSON.parse(rawBody);
   } catch (e) {
     return errorResponse("بيانات الطلب غير صالحة.", 400);
   }
+
+  const playlistId = body && body.playlistId;
   const videoId = body && body.videoId;
   const srtText = body && (body.srtText || body.text || "");
-  if (!isValidVideoId(videoId)) {
-    return errorResponse("معرّف الفيديو غير صالح.", 400);
+  if (!isValidPlaylistId(playlistId) || !isValidVideoId(videoId)) {
+    return errorResponse("رابط المسلسل أو معرّف الحلقة غير صالح.", 400);
   }
+  if (!(await isApprovedEpisode(env, playlistId, videoId))) {
+    return errorResponse("هذه الحلقة غير موجودة ضمن مسلسلات AniDoa المعتمدة.", 404, {
+      code: "EPISODE_NOT_FOUND",
+    });
+  }
+
+  const cached = await kvGetJson(env, "sub:" + videoId);
+  if (cached && Array.isArray(cached.subtitles) && cached.subtitles.length > 0) {
+    return jsonResponse({
+      videoId,
+      source: cached.source || "cache",
+      cached: true,
+      translatedAt: cached.translatedAt || null,
+      subtitles: cached.subtitles,
+    });
+  }
+
   if (!srtText || typeof srtText !== "string" || srtText.trim().length < 10) {
     return errorResponse("نص الترجمة فارغ أو قصير جداً. الصق ملف ترجمة كاملاً.", 400);
   }
   if (new TextEncoder().encode(srtText).length > MAX_MANUAL_TEXT_BYTES) {
     return errorResponse("ملف الترجمة أكبر من الحد المسموح (500KB).", 413);
   }
+
   let cues = [];
   if (srtText.trim().startsWith("WEBVTT")) {
     cues = parseVTT(srtText);
@@ -365,6 +461,10 @@ async function handleTranslateManual(request, env) {
   if (cues.length === 0) {
     return errorResponse("تعذّر فهم ملف الترجمة. تأكد أنه بصيغة SRT أو VTT صحيحة.", 400);
   }
+
+  const rateLimitResponse = await checkTranslationRateLimit(request, env, "manual");
+  if (rateLimitResponse) return rateLimitResponse;
+
   let translated;
   try {
     translated = await translateSubtitles(cues, env);
@@ -399,24 +499,31 @@ async function handleWatch(env, url) {
     playlistId = playlistId || pathParts[1] || "";
     videoId = videoId || pathParts[2] || "";
   }
-  if (!playlistId) {
-    return htmlResponse(renderErrorPage("لم يتم تحديد المسلسل", "ارجع إلى الرئيسية واختر مسلسلاً للمشاهدة."), 400);
+  if (!isValidPlaylistId(playlistId)) {
+    return htmlResponse(renderErrorPage("رابط المسلسل غير صالح", "ارجع إلى الرئيسية واختر مسلسلاً من المكتبة."), 400);
   }
-  let series = await kvGetJson(env, "playlist:" + playlistId);
+
+  // Never fetch arbitrary YouTube playlists from a public watch URL.
+  // Only playlists explicitly imported by an authenticated administrator are watchable.
+  const series = await kvGetJson(env, "playlist:" + playlistId);
   if (!series) {
-    try {
-      series = await fetchAndStoreSeries(playlistId, env);
-    } catch (e) {
-      console.error("[AniDoa] Watch fetch failed:", e && e.message);
-      return htmlResponse(renderErrorPage("تعذّر تحميل المسلسل", e.message || "حاول مرة أخرى لاحقاً."), 502);
-    }
+    return htmlResponse(
+      renderErrorPage("المسلسل غير موجود في المكتبة", "يجب على المدير إضافة قائمة التشغيل أولاً من الصفحة الرئيسية."),
+      404
+    );
   }
+
   const episodes = Array.isArray(series.episodes) ? series.episodes : [];
   if (episodes.length === 0) {
     return htmlResponse(renderErrorPage("المسلسل بلا حلقات", "قائمة التشغيل فارغة."), 404);
   }
-  let episode = episodes.find((ep) => ep.videoId === videoId);
-  if (!episode) episode = episodes[0];
+  if (videoId && !isValidVideoId(videoId)) {
+    return htmlResponse(renderErrorPage("رابط الحلقة غير صالح", "ارجع إلى قائمة الحلقات واختر حلقة صحيحة."), 400);
+  }
+  const episode = videoId ? episodes.find((ep) => ep.videoId === videoId) : episodes[0];
+  if (!episode) {
+    return htmlResponse(renderErrorPage("الحلقة غير موجودة", "اختر حلقة من قائمة حلقات المسلسل."), 404);
+  }
   return htmlResponse(renderWatchPage(series, episode, episodes));
 }
 
