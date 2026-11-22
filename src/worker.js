@@ -17,15 +17,19 @@ export class AniDoaRateLimiter extends DurableObject {
         bucket TEXT NOT NULL,
         count INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (ip, bucket)
-      );
-      CREATE TABLE IF NOT EXISTS global_day_limits (
+      )`
+    );
+    this.ctx.storage.sql.exec(
+      `CREATE TABLE IF NOT EXISTS global_day_limits (
         bucket TEXT PRIMARY KEY,
         count INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS active_translations (
+      )`
+    );
+    this.ctx.storage.sql.exec(
+      `CREATE TABLE IF NOT EXISTS active_translations (
         video_id TEXT PRIMARY KEY,
         started_at TEXT NOT NULL
-      );`
+      )`
     );
   }
 
