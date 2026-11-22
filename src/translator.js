@@ -1,6 +1,6 @@
 /**
  * AniDoa — translator.js
- * محرك الترجمة الذكي عبر Google Gemini 2.5 Flash.
+ * محرك الترجمة الذكي عبر Google Gemini 3.5 Flash-Lite.
  *
  * - تقسيم الترجمة إلى دفعات (Chunks) كل دفعة 50 سطراً
  * - Context Overlap: آخر سطرين من الدفعة السابقة كسياق فقط
@@ -9,7 +9,7 @@
  * - مخرجات JSON نظيفة فقط مع تحقق وإعادة محاولة
  */
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.5-flash-lite";
 const CHUNK_SIZE = 50;
 const CONTEXT_OVERLAP = 2;
 const REQUEST_TIMEOUT_MS = 30000;
@@ -138,8 +138,6 @@ async function callGemini(prompt, apiKey) {
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
-      temperature: 0.2,
-      topP: 0.9,
       maxOutputTokens: 8192,
       responseMimeType: "application/json",
     },
