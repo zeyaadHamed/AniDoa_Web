@@ -247,6 +247,75 @@ test("translation fails closed when the Durable Object rate limiter is unavailab
   }
 });
 
+test("an in-flight episode translation returns 409 instead of starting a duplicate Gemini request", async () => {
+  const series = {
+    playlistId: PLAYLIST_ID,
+    episodes: [{ videoId: VIDEO_ID, title: "Episode one" }],
+  };
+  const env = {
+    ANIDOA_KV: makeKv({
+      ["playlist:" + PLAYLIST_ID]: JSON.stringify(series),
+    }),
+    ANIDOA_RATE_LIMITER: makeLimiter({
+      allowed: false,
+      scope: "in_progress",
+      retryAfter: 30,
+    }),
+    GEMINI_API_KEY: "not-a-real-key",
+  };
+  const originalFetch = globalThis.fetch;
+  let networkCalls = 0;
+  globalThis.fetch = async (input) => {
+    networkCalls++;
+    const url = String(input);
+    if (url.includes("youtubei/v1/player")) {
+      return new Response(
+        JSON.stringify({
+          captions: {
+            playerCaptionsTracklistRenderer: {
+              captionTracks: [
+                { languageCode: "en", baseUrl: "https://captions.test/en" },
+              ],
+            },
+          },
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (url.includes("captions.test/en")) {
+      return new Response(
+        JSON.stringify({
+          events: [
+            { tStartMs: 1000, dDurationMs: 1200, segs: [{ utf8: "Hello from captions" }] },
+          ],
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+    throw new Error("Unexpected request: " + url);
+  };
+
+  try {
+    const response = await worker.fetch(
+      new Request(
+        "https://anidoa.test/api/subtitles?playlist=" +
+          PLAYLIST_ID +
+          "&videoId=" +
+          VIDEO_ID
+      ),
+      env
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 409);
+    assert.equal(body.code, "TRANSLATION_IN_PROGRESS");
+    assert.equal(response.headers.get("Retry-After"), "30");
+    assert.equal(networkCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("admin JSON endpoints reject oversized Content-Length before parsing", async () => {
   const request = new Request("https://anidoa.test/api/series", {
     method: "POST",
