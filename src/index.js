@@ -6,15 +6,14 @@
  *   KV: series:index            → فهرس المسلسلات [{playlistId,title,thumbnail,episodeCount,addedAt,truncated}]
  *   KV: playlist:{playlistId}   → تفاصيل المسلسل {playlistId,title,episodes:[...],fetchedAt,truncated,totalFetched}
  *   KV: sub:{videoId}           → الترجمة العربية الجاهزة {videoId,source,translatedAt,subtitles}
- *   KV: rl:{ip}:{hourBucket}    → عدّاد حدود الترجمة لكل IP (15/ساعة، تقريبي)
- *   KV: rl:global:{dayBucket}   → عدّاد الحد اليومي العام (500/يوم، تقريبي)
+ *   Durable Object SQLite → عدّادات حدود الترجمة (15/ساعة لكل IP، 500/يوم إجمالاً)
  *
  * نموذج الحماية (v2):
  * - صفحة المشاهدة تعمل فقط لمسلسلات موجودة في المكتبة — لا يُستدعى YouTube API
  *   أبداً من رابط مشاهدة عشوائي، فلا يمكن استنزاف الحصة اليومية بروابط خارجية.
  * - الترجمة (التلقائية واليدوية) تتطلب أن تكون الحلقة عضواً في مسلسل بالمكتبة.
  * - الترجمة اليدوية محمية بكلمة سر المدير.
- * - حد تقريبي لطلبات الترجمة غير المخزّنة: 15/ساعة لكل IP و 500/يوم إجمالاً.
+ * - حد ذريّ عبر Durable Object + SQLite: 15/ساعة لكل IP و 500/يوم إجمالاً.
  * - ترويسات أمان على كل الردود.
  *
  * المتغيرات المطلوبة (Secrets من Dashboard):
@@ -23,6 +22,7 @@
  *   GEMINI_MODEL (اختياري — تجاوز نموذج الترجمة، الافتراضي gemini-3.5-flash-lite)
  * الربط المطلوب:
  *   ANIDOA_KV (KVNamespace)
+ *   ANIDOA_RATE_LIMITER (DurableObjectNamespace)
  */
 
 import { getEnglishSubtitles, parseSRT, parseVTT, NoSubtitlesError, fetchWithTimeout } from "./subtitles.js";
@@ -35,9 +35,6 @@ import {
   isValidPlaylistId,
   timingSafeEqual,
   getClientIp,
-  hourBucket,
-  dayBucket,
-  rateLimitKey,
 } from "./security.js";
 
 // إعادة تصدير للتوافق مع الإصدار الأول (كان extractPlaylistId يُصدَّر من هنا).
@@ -49,6 +46,7 @@ const MAX_EPISODES_PER_SERIES = 500;
 const RATE_LIMIT_PER_IP_PER_HOUR = 15;
 const RATE_LIMIT_GLOBAL_PER_DAY = 500;
 const MAX_ADMIN_REQUEST_BYTES = 16 * 1024;
+const RATE_LIMITER_OBJECT_NAME = "anidoa-global-translation-budget-v1";
 
 async function readJsonBody(request, maxBytes) {
   const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : MAX_ADMIN_REQUEST_BYTES;
@@ -158,84 +156,28 @@ async function kvDelete(env, key) {
   await env.ANIDOA_KV.delete(key);
 }
 
-function secondsUntilHourEnd(now) {
-  const d = now || new Date();
-  return 3600 - (d.getUTCMinutes() * 60 + d.getUTCSeconds());
-}
-
-function secondsUntilDayEnd(now) {
-  const d = now || new Date();
-  return 86400 - (d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds());
-}
-
-async function readCounter(env, key) {
-  if (!env || !env.ANIDOA_KV) return 0;
-  try {
-    const raw = await env.ANIDOA_KV.get(key);
-    const n = parseInt(raw || "0", 10);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  } catch (e) {
-    console.error("[AniDoa] Rate-limit read failed for " + key + ":", e && e.message);
-    return 0;
-  }
-}
-
-async function incrementCounter(env, key, expirationTtl) {
-  if (!env || !env.ANIDOA_KV) return;
-  const current = await readCounter(env, key);
-  try {
-    await env.ANIDOA_KV.put(key, String(current + 1), { expirationTtl });
-  } catch (e) {
-    console.error("[AniDoa] Rate-limit write failed for " + key + ":", e && e.message);
-  }
-}
-
 /**
- * حد تقريبي لطلبات الترجمة غير المخزّنة (سحب+ترجمة جديدة وترجمة يدوية):
- * 15 طلباً/ساعة لكل IP و 500 طلب/يوم إجمالاً للمنصة.
- * الترجمات المخزنة في KV تتجاوز الحد تماماً (لا تُحسب ولا تُفحص).
- *
- * تحذير — الحد تقريبي وليس صارماً: Cloudflare KV متسق في النهاية
- * (eventually consistent) وقد تتسابق الزيادات المتزامنة من مناطق مختلفة
- * فتضيع بعض الزيادات، وقد تتأخر القراءة عن الكتابة. هذا كافٍ لتقليل
- * إساءة الاستخدام والتكاليف، لكنه لا يضمن حداً دقيقاً بالوحدة.
+ * الحد يتم داخل Durable Object واحد يستخدم SQLite ومعاملة ذرية:
+ * 15 طلب ترجمة/ساعة لكل IP، و500 طلب/يوم للمنصة.
+ * الترجمات المحفوظة في KV تتجاوز الحد لأنها لا تستدعي هذه الدالة.
+ * إذا كان ربط DO غير متاح نوقف الترجمة حفاظًا على رصيد Gemini.
  */
 async function checkRateLimit(env, request) {
-  // Fail closed: when KV is unavailable, do not spend Gemini quota without tracking it.
-  if (!env || !env.ANIDOA_KV) return { allowed: false, scope: "storage", retryAfter: 60 };
-
-  const now = new Date();
-  const ip = getClientIp(request);
-  const ipKey = rateLimitKey("rl", ip, hourBucket(now));
-  const globalKey = rateLimitKey("rl", "global", dayBucket(now));
+  const namespace = env && env.ANIDOA_RATE_LIMITER;
+  if (!namespace || typeof namespace.getByName !== "function") {
+    return { allowed: false, scope: "storage", retryAfter: 60 };
+  }
 
   try {
-    const [ipRaw, globalRaw] = await Promise.all([
-      env.ANIDOA_KV.get(ipKey),
-      env.ANIDOA_KV.get(globalKey),
-    ]);
-    const ipCount = Math.max(0, parseInt(ipRaw || "0", 10) || 0);
-    const globalCount = Math.max(0, parseInt(globalRaw || "0", 10) || 0);
-
-    if (ipCount >= RATE_LIMIT_PER_IP_PER_HOUR) {
-      return { allowed: false, scope: "ip", retryAfter: secondsUntilHourEnd(now) };
-    }
-    if (globalCount >= RATE_LIMIT_GLOBAL_PER_DAY) {
-      return { allowed: false, scope: "global", retryAfter: secondsUntilDayEnd(now) };
-    }
-
-    // KV read/modify/write is not atomic; this is a best-effort guard, not a strict quota.
-    await Promise.all([
-      env.ANIDOA_KV.put(ipKey, String(ipCount + 1), {
-        expirationTtl: Math.max(60, secondsUntilHourEnd(now)),
-      }),
-      env.ANIDOA_KV.put(globalKey, String(globalCount + 1), {
-        expirationTtl: Math.max(60, secondsUntilDayEnd(now)),
-      }),
-    ]);
-    return { allowed: true };
+    const limiter = namespace.getByName(RATE_LIMITER_OBJECT_NAME);
+    return await limiter.checkAndIncrement(
+      getClientIp(request),
+      new Date().toISOString(),
+      RATE_LIMIT_PER_IP_PER_HOUR,
+      RATE_LIMIT_GLOBAL_PER_DAY
+    );
   } catch (e) {
-    console.error("[AniDoa] Rate-limit storage unavailable:", e && e.message);
+    console.error("[AniDoa] Durable rate limiter unavailable:", e && e.message);
     return { allowed: false, scope: "storage", retryAfter: 60 };
   }
 }
@@ -700,8 +642,14 @@ export default {
           youtube: !!(env && env.YOUTUBE_API_KEY),
           gemini: !!(env && env.GEMINI_API_KEY),
           admin: !!(env && env.ADMIN_SECRET),
+          rateLimiter: !!(env && env.ANIDOA_RATE_LIMITER),
         };
-        const ready = kvStatus === "ok" && configuration.youtube && configuration.gemini && configuration.admin;
+        const ready =
+          kvStatus === "ok" &&
+          configuration.youtube &&
+          configuration.gemini &&
+          configuration.admin &&
+          configuration.rateLimiter;
         return jsonResponse(
           {
             ok: ready,
