@@ -484,9 +484,9 @@ export function renderWatchPage(series, episode, episodes) {
     "  try {\n" +
     "    var res = await fetch('/api/subtitles?videoId=' + encodeURIComponent(CURRENT_VIDEO_ID) + '&playlist=' + encodeURIComponent(PLAYLIST_ID));\n" +
     "    var data = await res.json().catch(function () { return {}; });\n" +
-    "    if (res.status === 429) {\n" +
-    "      var retryAfter = parseInt(res.headers.get('Retry-After') || '60', 10) || 60;\n" +
-    "      startRateLimitCountdown(retryAfter, (data && data.error) || 'تم تجاوز حد الترجمة المؤقت.');\n" +
+    "    if (res.status === 429 || res.status === 409) {\n" +
+    "      var retryAfter = parseInt(res.headers.get('Retry-After') || '30', 10) || 30;\n" +
+    "      startRateLimitCountdown(retryAfter, (data && data.error) || 'الترجمة قيد التنفيذ أو تم تجاوز الحد.');\n" +
     "      return;\n" +
     "    }\n" +
     "    if (res.status === 404 && data && data.code === 'NOT_IN_LIBRARY') {\n" +
@@ -567,7 +567,7 @@ export function renderWatchPage(series, episode, episodes) {
     "    var res = await fetch('/api/translate-manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ videoId: CURRENT_VIDEO_ID, playlistId: PLAYLIST_ID, srtText: text, adminSecret: secret }) });\n" +
     "    var data = await res.json().catch(function () { return {}; });\n" +
     "    if (res.status === 403) throw new Error('كلمة سر المدير غير صحيحة.');\n" +
-    "    if (res.status === 429) { var ra = res.headers.get('Retry-After'); throw new Error((data.error || 'تم تجاوز حد الترجمة.') + (ra ? ' حاول بعد ' + ra + ' ثانية.' : '')); }\n" +
+    "    if (res.status === 429 || res.status === 409) { var ra = res.headers.get('Retry-After'); throw new Error((data.error || 'الترجمة قيد التنفيذ أو تم تجاوز الحد.') + (ra ? ' حاول بعد ' + ra + ' ثانية.' : '')); }\n" +
     "    if (!res.ok) throw new Error(data.error || 'فشلت ترجمة الملف.');\n" +
     "    subtitles = sortCues(Array.isArray(data.subtitles) ? data.subtitles : []);\n" +
     "    lastCueIndex = -1;\n" +
