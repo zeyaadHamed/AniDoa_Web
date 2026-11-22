@@ -512,7 +512,7 @@ export function renderWatchPage(series, episode, episodes) {
     "    subtitles = sortCues(Array.isArray(data.subtitles) ? data.subtitles : []);\n" +
     "    if (subtitles.length === 0) throw new Error('الترجمة المترجمة فارغة.');\n" +
     "    document.getElementById('downloadSrtBtn').disabled = false;\n" +
-    "    showStatus('تم تحميل الترجمة العربية بنجاح (' + subtitles.length + ' سطراً).', 'success', false);\n" +
+    "    showStatus(data.cacheSaved === false ? 'تم تحميل الترجمة، لكن تعذّر حفظها في التخزين؛ قد تتطلب الحلقة ترجمة مرة أخرى لاحقاً.' : 'تم تحميل الترجمة العربية بنجاح (' + subtitles.length + ' سطراً).', data.cacheSaved === false ? 'info' : 'success', false);\n" +
     "    setTimeout(function () { document.getElementById('subStatus').style.display = 'none'; }, 3500);\n" +
     "  } catch (err) {\n" +
     "    showStatus(err.message || 'تعذّر تحميل الترجمة.', 'error', true);\n" +
@@ -572,7 +572,7 @@ export function renderWatchPage(series, episode, episodes) {
     "    subtitles = sortCues(Array.isArray(data.subtitles) ? data.subtitles : []);\n" +
     "    lastCueIndex = -1;\n" +
     "    document.getElementById('downloadSrtBtn').disabled = false;\n" +
-    "    alertEl.textContent = 'تمت ترجمة الملف بنجاح (' + subtitles.length + ' سطراً).'; alertEl.className = 'alert show success';\n" +
+    "    alertEl.textContent = data.cached ? 'تم استخدام الترجمة المحفوظة بالفعل (' + subtitles.length + ' سطراً).' : (data.cacheSaved === false ? 'تمت الترجمة لكن تعذّر حفظها؛ قد تتكرر تكلفة الترجمة عند إعادة فتح الحلقة.' : 'تمت ترجمة الملف وحفظه بنجاح (' + subtitles.length + ' سطراً).'); alertEl.className = data.cacheSaved === false ? 'alert show info' : 'alert show success';\n" +
     "    showStatus('تمت ترجمة الملف المرفوع بنجاح.', 'success', false);\n" +
     "  } catch (err) {\n" +
     "    alertEl.textContent = err.message || 'فشلت ترجمة الملف.'; alertEl.className = 'alert show error';\n" +
