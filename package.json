@@ -10,7 +10,8 @@
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "test": "node --test"
   },
   "type": "module",
   "version": "1.0.0"
