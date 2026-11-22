@@ -25,7 +25,7 @@
 # ============================================================
 
 name = "anidoa"
-main = "src/index.js"
+main = "src/worker.js"
 compatibility_date = "2026-11-23"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
@@ -35,6 +35,16 @@ workers_dev = true
 binding = "ANIDOA_KV"
 id = "fd214f6dcf44cfba0bb6a11df9abc16"
 preview_id = "fd214f6dcf44cfba0bb6a11df9abc16"
+
+
+# Atomic translation budget (SQLite-backed Durable Object).
+[[durable_objects.bindings]]
+name = "ANIDOA_RATE_LIMITER"
+class_name = "AniDoaRateLimiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AniDoaRateLimiter"]
 
 [vars]
 # لا تضع المفاتيح السرية هنا أبداً — ضعها كـ Secrets من Dashboard.
