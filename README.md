@@ -82,28 +82,27 @@ Cloudflare Worker (src/index.js)
 1. افتح [github.com/new](https://github.com/new) وأنشئ مستودعاً باسم `AniDoa_Web` (عام أو خاص — كلاهما يعمل).
 2. ارفع ملفات هذا المشروع من صفحة المستودع: زر **Add file ← Upload files** ثم اسحب كل الملفات والمجلدات (`wrangler.toml`، `package.json`، مجلد `src/`، مجلد `tests/`، مجلد `.github/`، `README.md`).
 
-### الخطوة 2: إنشاء KV من لوحة Cloudflare
+### الخطوة 2: تأكد من مساحة KV الموجودة
 
 1. سجّل دخولك إلى [dash.cloudflare.com](https://dash.cloudflare.com).
-2. من القائمة اذهب إلى **Workers & Pages ← KV**.
-3. اضغط **Create namespace** وسمّه `ANIDOA_KV`.
-4. انسخ الـ **ID** الذي سيظهر — ستحتاجه في الخطوة التالية.
+2. افتح **Workers & Pages → KV**.
+3. تأكد من وجود مساحة `ANIDOA_KV`.
+4. ملف `wrangler.toml` يحتوي بالفعل على Namespace ID الذي أرسلته في صورتك. لا تنشئ مساحة ثانية ولا تغيّر الـ ID ما دامت هذه هي المساحة الموجودة في حسابك.
+5. إذا حذفت مساحة KV أو غيّرت حساب Cloudflare، حدّث `id` و`preview_id` بمعرّف المساحة الجديدة قبل النشر.
 
-### الخطوة 3: إنشاء Worker من GitHub
+### الخطوة 3: Durable Object للحدود
 
-1. من لوحة Cloudflare اذهب إلى **Workers & Pages ← Create ← Workers ← Connect to Git**.
+ملف `wrangler.toml` يعرّف `ANIDOA_RATE_LIMITER` وترحيل SQLite باسم `AniDoaRateLimiter`. لا تنشئ Durable Object يدويًا من لوحة التحكم ولا تضف Binding آخر. Wrangler سيطبّق الترحيل عند نشر هذا الإصدار. احتفظ باسم الكلاس ومعرّف الترحيل كما هما بعد أول نشر حتى لا تنشئ قاعدة جديدة وتفقد عدادات الحماية.
+
+### الخطوة 4: إنشاء Worker من GitHub
+
+1. من لوحة Cloudflare اذهب إلى **Workers & Pages → Create → Workers → Connect to Git**.
 2. اختر مستودع `AniDoa_Web` وامنح Cloudflare صلاحية الوصول إليه.
-3. في إعدادات النشر:
-   - **Framework preset**: اختر `None` أو اتركه فارغاً.
-   - **Build command**: اتركه فارغاً (لا يوجد Build).
-   - **Deploy command**: `npx wrangler deploy` (أو اترك الإعداد الافتراضي).
-4. قبل أول نشر، عدّل ملف `wrangler.toml` **من موقع GitHub نفسه** (افتح الملف ← زر القلم ✏️):
-   - استبدل `REPLACE_WITH_KV_ID` بالـ ID الذي نسخته من الخطوة 2.
-   - استبدل `REPLACE_WITH_KV_PREVIEW_ID` بنفس الـ ID.
-   - اضغط **Commit changes** — وسيعيد Cloudflare النشر تلقائياً.
-5. بديل أسهل للربط: من صفحة الـ Worker اذهب إلى **Settings ← Variables ← KV Namespace Bindings ← Add binding** واختر Binding name = `ANIDOA_KV` والـ Namespace الذي أنشأته.
+3. اختر الفرع `main` بعد دمج طلب التحديثات.
+4. اسم Worker يجب أن يكون `anidoa`، ومجلد المشروع هو جذر المستودع.
+5. استخدم أمر النشر `npx wrangler deploy`. لا تحتاج Framework preset أو خطوة بناء Frontend منفصلة.
 
-### الخطوة 4: ضبط الأسرار والمتغيرات من Dashboard
+### الخطوة 5: ضبط الأسرار والمتغيرات من Dashboard
 
 من صفحة الـ Worker اذهب إلى **Settings ← Variables ← Add variable**:
 
@@ -124,11 +123,11 @@ Cloudflare Worker (src/index.js)
 
 > ⚠️ لا تضع المفاتيح أبداً داخل `wrangler.toml` أو في أي ملف في المستودع — Secrets من Dashboard فقط.
 
-### الخطوة 5: النشر والاختبار
+### الخطوة 6: النشر والاختبار
 
 1. بعد ضبط الـ KV والأسرار، اضغط **Deploy** أو **Retry deployment** من صفحة الـ Worker.
 2. افتح رابط الـ Worker (مثل `https://anidoa.<subdomain>.workers.dev`).
-3. تحقق من الصحة: افتح `<رابط الـ Worker>/api/health` — يجب أن ترى `{"ok":true,"kv":"ok","model":"gemini-3.5-flash-lite",...}`.
+3. تحقق من الصحة: افتح `<رابط الـ Worker>/api/health`. الجاهزية ترجع HTTP 200 و`ok: true` و`kv: "ok"` و`configuration.rateLimiter: true`. إذا نقص Secret أو ربط Durable Object سترجع HTTP 503 و`ok: false`.
 4. أضف أول مسلسل من نموذج "إضافة مسلسل جديد" باستخدام رابط قائمة تشغيل يوتيوب + كلمة سر المدير.
 5. افتح أي حلقة — ستُترجم أول مرة خلال دقيقة تقريباً، ثم تفتح بعدها فوراً من الذاكرة.
 
@@ -145,7 +144,7 @@ Cloudflare Worker (src/index.js)
 ### مفتاح Gemini
 1. افتح [Google AI Studio](https://aistudio.google.com/apikey).
 2. اضغط **Create API key** وانسخ المفتاح.
-3. الخطة المجانية تكفي للترجمة اليومية المعتدلة.
+3. راجع [الأسعار والحصص وسياسة استخدام البيانات الرسمية](https://ai.google.dev/gemini-api/docs/pricing). نصوص الترجمة تُرسل إلى Google Gemini؛ قد تستخدم Google مدخلات ومخرجات API المجاني لتحسين منتجاتها، لذلك لا ترسل محتوى خاصًا أو حساسًا.
 
 ---
 
@@ -160,16 +159,17 @@ Cloudflare Worker (src/index.js)
 
 ---
 
-## 💰 التكلفة (الخطة المجانية)
+## 💰 الحصص والتكلفة
 
-| الخدمة | الحد المجاني | استهلاك AniDoa |
+| الخدمة | حدود شائعة يجب مراقبتها | استهلاك AniDoa |
 |---|---|---|
-| Cloudflare Workers | 100,000 طلب/يوم | طلب واحد لكل صفحة + طلب لكل ترجمة جديدة |
-| Cloudflare KV | 1,000 كتابة + 100,000 قراءة/يوم | كتابة واحدة لكل حلقة مترجمة، وقراءة سريعة بعدها |
-| YouTube Data API | 10,000 وحدة/يوم | ~3 وحدات لكل حلقة عند إضافة المسلسل فقط (المشاهدة لا تستهلك شيئاً) |
-| Gemini 3.5 Flash-Lite | حصة مجانية يومية سخية | تُستهلك مرة واحدة لكل حلقة فقط، مع حد 500 طلب/يوم كحماية إضافية |
+| Cloudflare Workers | الخطة المجانية تتضمن عادةً 100,000 طلب يوميًا؛ راجع حدود حسابك | طلبات الصفحات وواجهات API |
+| Cloudflare KV | على الخطة المجانية عادةً 100,000 قراءة و1,000 كتابة/حذف يوميًا، و1 GB تخزين | قراءة بيانات المسلسلات؛ وكتابة بيانات الحلقات والترجمات |
+| Cloudflare Durable Objects | الخطة المجانية تتضمن عادةً 100,000 طلب يوميًا | استدعاء للحماية عند كل ترجمة جديدة |
+| YouTube Data API | الحصة الافتراضية الشائعة 10,000 وحدة يوميًا؛ كل endpoint له تكلفة وحدات منفصلة | طلب بيانات القائمة وطلبات صفحات الحلقات |
+| Gemini 3.5 Flash-Lite | راجع أسعار وحصص النموذج الحالية؛ تختلف حسب مستوى الحساب وتتغير | استهلاك عند ترجمة جديدة فقط |
 
-النتيجة: **منصة كاملة مجاناً** للاستخدام الشخصي والمتوسط.
+**مهم:** حد AniDoa الداخلي (15 ترجمة/ساعة لكل IP و500 ترجمة/يوم إجمالًا) سقف إضافي، وليس بديلًا عن حدود Cloudflare أو Google. راقب الاستخدام والفواتير من لوحات التحكم. لا أضمن تشغيلًا مجانيًا بلا حدود.
 
 ---
 
@@ -202,10 +202,9 @@ Header: x-admin-secret: <ADMIN_SECRET>
 
 ## 🧪 الاختبارات التلقائية
 
-- تعمل **تلقائياً على GitHub Actions** مع كل Push أو Pull Request على `main` (انظر `.github/workflows/test.yml` والشارة أعلى الملف).
-- تشمل: فحص صياغة كل ملفات `src/` عبر `node --check`، ثم تشغيل الاختبارات بـ `npm test` (أي `node --test tests/*.test.js`).
-- الاختبارات تستخدم **Node built-ins فقط** (`node:test` + `node:assert`) — صفر اعتماديات، ولا تحتاج `npm install`.
-- التغطية: أدوات الأمان (`security.test.js`)، محللات الترجمة (`subtitles.test.js`)، محرك الترجمة (`translator.test.js`)، محرك الأسطر (`cues.test.js`)، وواجهات المنصة (`ui.test.js`).
+- تعمل عبر GitHub Actions عند Push إلى `main` أو فرع المراجعة، وعند Pull Request إلى `main`.
+- تشمل فحص صياغة ملفات Worker، وتشغيل `npm test)، ثم `wrangler deploy --dry-run` لفحص تجميع المشروع دون نشره.
+- التغطية تشمل الأمن، حدود الترجمة، محللات الترجمة، محرك التوقيت، الواجهات، ومسارات Worker.
 
 ---
 
@@ -225,7 +224,7 @@ Header: x-admin-secret: <ADMIN_SECRET>
 | "تجاوزت حد طلبات Gemini مؤقتاً" | Gemini نفسه فرض حداً مؤقتاً — المحرك يعيد المحاولة تلقائياً، وإن استمرت حاول لاحقاً |
 | الحلقة تظهر "بدون ترجمة إنجليزية" | الحلقة Hardsub أو بلا CC — ارفع ملف `.srt` من نفس الصفحة مع كلمة سر المدير وسيُترجم فوراً |
 | الترجمة متقدمة أو متأخرة | استخدم زرّي ±0.5 ثانية في شريط التحكم — تُحفظ المزامنة تلقائياً |
-| `/api/health` يظهر `"kv":"error"` | ربط KV غير صحيح أو Namespace محذوف — راجع الخطوة 2 و3 من النشر |
+| `/api/health` يرجع HTTP 503 | افحص `kv` وحقول `configuration`؛ تأكد من الأسرار وربط Durable Object في `wrangler.toml` |
 
 ---
 
@@ -236,13 +235,17 @@ AniDoa_Web/
 ├── wrangler.toml       # إعدادات Cloudflare Workers + ربط KV + توثيق GEMINI_MODEL والحدود
 ├── package.json        # بيانات المشروع وسكربتات النشر والاختبار (Wrangler 4.x)
 ├── src/
-│   ├── index.js        # الـ Worker الرئيسي: التوجيه + YouTube API + KV + الحماية + الحدود
-│   ├── security.js     # أدوات الأمان النقية: ترويسات + تحقق + مقارنة آمنة + أدوات الحد
+│   ├── worker.js       # نقطة الدخول + Durable Object للحصص
+│   ├── index.js        # الـ Worker الرئيسي: التوجيه + YouTube API + KV + الحماية
+│   ├── security.js     # أدوات الأمان النقية: ترويسات + تحقق + مقارنة آمنة
+│   ├── rate-limit-core.js # قواعد حدود الترجمة واختبارها
 │   ├── cues.js         # محرك أسطر الترجمة: بحث ثنائي + مسار متسلسل + تصدير SRT
 │   ├── subtitles.js    # سحب الترجمة الإنجليزية (4 مستويات Fallback)
 │   ├── translator.js   # ترجمة Gemini 3.5 Flash-Lite (دفعات + سياق + قاموس + إعادة محاولة)
 │   └── ui.js           # كل الواجهات: الرئيسية + المشاهدة + المشغل + الترجمة + تحميل SRT
-├── tests/              # اختبارات Node built-ins (بدون اعتماديات)
+├── tests/              # اختبارات Node built-ins
+│   ├── rate-limit.test.js
+│   ├── worker.test.js
 │   ├── security.test.js
 │   ├── subtitles.test.js
 │   ├── translator.test.js
