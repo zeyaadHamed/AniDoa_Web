@@ -71,3 +71,7 @@ export class AniDoaRateLimiter extends DurableObject {
     });
   }
 }
+
+import app from "./index.js";
+
+export default app;
