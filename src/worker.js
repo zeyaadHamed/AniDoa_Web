@@ -21,20 +21,38 @@ export class AniDoaRateLimiter extends DurableObject {
       CREATE TABLE IF NOT EXISTS global_day_limits (
         bucket TEXT PRIMARY KEY,
         count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS active_translations (
+        video_id TEXT PRIMARY KEY,
+        started_at TEXT NOT NULL
       );`
     );
   }
 
-  checkAndIncrement(ip, nowIso, ipLimit, dailyLimit) {
+  claimTranslation(ip, videoId, nowIso, ipLimit, dailyLimit) {
     const now = new Date(nowIso);
     const buckets = getRateLimitBuckets(now);
+    const nowMs = now.getTime();
     const safeIp = typeof ip === "string" && ip.trim() ? ip.trim().slice(0, 96) : "unknown";
+    const safeVideoId = typeof videoId === "string" ? videoId.slice(0, 32) : "";
     const sql = this.ctx.storage.sql;
 
     return this.ctx.storage.transactionSync(() => {
       // Keep only the current hour/day buckets so this database stays small.
       sql.exec("DELETE FROM ip_hour_limits WHERE bucket < ?", buckets.hour);
       sql.exec("DELETE FROM global_day_limits WHERE bucket < ?", buckets.day);
+
+      // Prevent concurrent requests for the same episode from spending twice.
+      const activeRows = sql
+        .exec("SELECT started_at FROM active_translations WHERE video_id = ?", safeVideoId)
+        .toArray();
+      if (activeRows.length) {
+        const startedAt = Date.parse(activeRows[0].started_at);
+        if (Number.isFinite(startedAt) && nowMs - startedAt < 5 * 60 * 1000) {
+          return { allowed: false, scope: "in_progress", retryAfter: 30 };
+        }
+        sql.exec("DELETE FROM active_translations WHERE video_id = ?", safeVideoId);
+      }
 
       const ipRows = sql
         .exec("SELECT count FROM ip_hour_limits WHERE ip = ? AND bucket = ?", safeIp, buckets.hour)
@@ -66,9 +84,19 @@ export class AniDoaRateLimiter extends DurableObject {
          ON CONFLICT(bucket) DO UPDATE SET count = count + 1`,
         buckets.day
       );
+      sql.exec(
+        "INSERT INTO active_translations (video_id, started_at) VALUES (?, ?)",
+        safeVideoId,
+        now.toISOString()
+      );
 
       return decision;
     });
+  }
+
+  releaseTranslation(videoId) {
+    const safeVideoId = typeof videoId === "string" ? videoId.slice(0, 32) : "";
+    this.ctx.storage.sql.exec("DELETE FROM active_translations WHERE video_id = ?", safeVideoId);
   }
 }
 
