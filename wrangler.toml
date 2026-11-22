@@ -25,8 +25,8 @@ workers_dev = true
 # ربط Cloudflare KV — استبدل القيمتين بالـ IDs الحقيقية من Dashboard
 [[kv_namespaces]]
 binding = "ANIDOA_KV"
-id = "REPLACE_WITH_KV_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
+id = "fd214f6dcf44cfba0bb6a11df9abc16"
+preview_id = "fd214f6dcf44cfba0bb6a11df9abc16"
 
 # حد تقريبي لحماية استدعاءات Gemini من الاستخدام المتكرر.
 # غيّر namespace_id إلى رقم موجب آخر إذا كان مستخدماً بالفعل في حسابك.
