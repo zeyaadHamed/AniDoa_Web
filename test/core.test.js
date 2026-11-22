@@ -45,6 +45,6 @@ test("escapes HTML text before rendering user-provided strings", () => {
 
 test("escapes script-breaking characters in inline JSON", () => {
   const safe = safeJsonForHtml({ value: "</script><b>&" });
+  assert.equal(safe.includes("</script>"), false);
   assert.equal(safe.includes("\\u003c/script\\u003e"), true);
-  assert.equal(safe.includes("\\\\u003c/script\\\\u003e"), true);
 });
