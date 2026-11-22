@@ -29,10 +29,11 @@ function makeLimiter(decision) {
     getByName(name) {
       assert.equal(name, "anidoa-global-translation-budget-v1");
       return {
-        async checkAndIncrement() {
+        async claimTranslation() {
           if (decision instanceof Error) throw decision;
           return decision || { allowed: true };
         },
+        async releaseTranslation() {},
       };
     },
   };
