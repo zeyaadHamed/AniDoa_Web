@@ -1,0 +1,37 @@
+name: AniDoa checks
+
+on:
+  push:
+    branches: [main, fix/v2-production-review]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install project tooling
+        run: npm install --no-audit --no-fund
+
+      - name: Check Worker JavaScript syntax
+        run: |
+          for file in src/*.js; do
+            node --check "$file"
+          done
+
+      - name: Run automated tests
+        run: npm test
+
+      - name: Validate Wrangler bundle without deploying
+        run: npx wrangler deploy --dry-run

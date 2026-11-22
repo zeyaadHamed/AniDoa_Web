@@ -484,9 +484,9 @@ export function renderWatchPage(series, episode, episodes) {
     "  try {\n" +
     "    var res = await fetch('/api/subtitles?videoId=' + encodeURIComponent(CURRENT_VIDEO_ID) + '&playlist=' + encodeURIComponent(PLAYLIST_ID));\n" +
     "    var data = await res.json().catch(function () { return {}; });\n" +
-    "    if (res.status === 429) {\n" +
-    "      var retryAfter = parseInt(res.headers.get('Retry-After') || '60', 10) || 60;\n" +
-    "      startRateLimitCountdown(retryAfter, (data && data.error) || 'تم تجاوز حد الترجمة المؤقت.');\n" +
+    "    if (res.status === 429 || res.status === 409) {\n" +
+    "      var retryAfter = parseInt(res.headers.get('Retry-After') || '30', 10) || 30;\n" +
+    "      startRateLimitCountdown(retryAfter, (data && data.error) || 'الترجمة قيد التنفيذ أو تم تجاوز الحد.');\n" +
     "      return;\n" +
     "    }\n" +
     "    if (res.status === 404 && data && data.code === 'NOT_IN_LIBRARY') {\n" +
@@ -512,7 +512,7 @@ export function renderWatchPage(series, episode, episodes) {
     "    subtitles = sortCues(Array.isArray(data.subtitles) ? data.subtitles : []);\n" +
     "    if (subtitles.length === 0) throw new Error('الترجمة المترجمة فارغة.');\n" +
     "    document.getElementById('downloadSrtBtn').disabled = false;\n" +
-    "    showStatus('تم تحميل الترجمة العربية بنجاح (' + subtitles.length + ' سطراً).', 'success', false);\n" +
+    "    showStatus(data.cacheSaved === false ? 'تم تحميل الترجمة، لكن تعذّر حفظها في التخزين؛ قد تتطلب الحلقة ترجمة مرة أخرى لاحقاً.' : 'تم تحميل الترجمة العربية بنجاح (' + subtitles.length + ' سطراً).', data.cacheSaved === false ? 'info' : 'success', false);\n" +
     "    setTimeout(function () { document.getElementById('subStatus').style.display = 'none'; }, 3500);\n" +
     "  } catch (err) {\n" +
     "    showStatus(err.message || 'تعذّر تحميل الترجمة.', 'error', true);\n" +
@@ -567,12 +567,12 @@ export function renderWatchPage(series, episode, episodes) {
     "    var res = await fetch('/api/translate-manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ videoId: CURRENT_VIDEO_ID, playlistId: PLAYLIST_ID, srtText: text, adminSecret: secret }) });\n" +
     "    var data = await res.json().catch(function () { return {}; });\n" +
     "    if (res.status === 403) throw new Error('كلمة سر المدير غير صحيحة.');\n" +
-    "    if (res.status === 429) { var ra = res.headers.get('Retry-After'); throw new Error((data.error || 'تم تجاوز حد الترجمة.') + (ra ? ' حاول بعد ' + ra + ' ثانية.' : '')); }\n" +
+    "    if (res.status === 429 || res.status === 409) { var ra = res.headers.get('Retry-After'); throw new Error((data.error || 'الترجمة قيد التنفيذ أو تم تجاوز الحد.') + (ra ? ' حاول بعد ' + ra + ' ثانية.' : '')); }\n" +
     "    if (!res.ok) throw new Error(data.error || 'فشلت ترجمة الملف.');\n" +
     "    subtitles = sortCues(Array.isArray(data.subtitles) ? data.subtitles : []);\n" +
     "    lastCueIndex = -1;\n" +
     "    document.getElementById('downloadSrtBtn').disabled = false;\n" +
-    "    alertEl.textContent = 'تمت ترجمة الملف بنجاح (' + subtitles.length + ' سطراً).'; alertEl.className = 'alert show success';\n" +
+    "    alertEl.textContent = data.cached ? 'تم استخدام الترجمة المحفوظة بالفعل (' + subtitles.length + ' سطراً).' : (data.cacheSaved === false ? 'تمت الترجمة لكن تعذّر حفظها؛ قد تتكرر تكلفة الترجمة عند إعادة فتح الحلقة.' : 'تمت ترجمة الملف وحفظه بنجاح (' + subtitles.length + ' سطراً).'); alertEl.className = data.cacheSaved === false ? 'alert show info' : 'alert show success';\n" +
     "    showStatus('تمت ترجمة الملف المرفوع بنجاح.', 'success', false);\n" +
     "  } catch (err) {\n" +
     "    alertEl.textContent = err.message || 'فشلت ترجمة الملف.'; alertEl.className = 'alert show error';\n" +

@@ -6,15 +6,14 @@
  *   KV: series:index            → فهرس المسلسلات [{playlistId,title,thumbnail,episodeCount,addedAt,truncated}]
  *   KV: playlist:{playlistId}   → تفاصيل المسلسل {playlistId,title,episodes:[...],fetchedAt,truncated,totalFetched}
  *   KV: sub:{videoId}           → الترجمة العربية الجاهزة {videoId,source,translatedAt,subtitles}
- *   KV: rl:{ip}:{hourBucket}    → عدّاد حدود الترجمة لكل IP (15/ساعة، تقريبي)
- *   KV: rl:global:{dayBucket}   → عدّاد الحد اليومي العام (500/يوم، تقريبي)
+ *   Durable Object SQLite → عدّادات حدود الترجمة (15/ساعة لكل IP، 500/يوم إجمالاً)
  *
  * نموذج الحماية (v2):
  * - صفحة المشاهدة تعمل فقط لمسلسلات موجودة في المكتبة — لا يُستدعى YouTube API
  *   أبداً من رابط مشاهدة عشوائي، فلا يمكن استنزاف الحصة اليومية بروابط خارجية.
  * - الترجمة (التلقائية واليدوية) تتطلب أن تكون الحلقة عضواً في مسلسل بالمكتبة.
  * - الترجمة اليدوية محمية بكلمة سر المدير.
- * - حد تقريبي لطلبات الترجمة غير المخزّنة: 15/ساعة لكل IP و 500/يوم إجمالاً.
+ * - حد ذريّ عبر Durable Object + SQLite: 15/ساعة لكل IP و 500/يوم إجمالاً.
  * - ترويسات أمان على كل الردود.
  *
  * المتغيرات المطلوبة (Secrets من Dashboard):
@@ -23,9 +22,10 @@
  *   GEMINI_MODEL (اختياري — تجاوز نموذج الترجمة، الافتراضي gemini-3.5-flash-lite)
  * الربط المطلوب:
  *   ANIDOA_KV (KVNamespace)
+ *   ANIDOA_RATE_LIMITER (DurableObjectNamespace)
  */
 
-import { getEnglishSubtitles, parseSRT, parseVTT, NoSubtitlesError } from "./subtitles.js";
+import { getEnglishSubtitles, parseSRT, parseVTT, NoSubtitlesError, fetchWithTimeout } from "./subtitles.js";
 import { translateSubtitles, getActiveModel } from "./translator.js";
 import { renderHome, renderWatchPage, renderErrorPage, logoSVG } from "./ui.js";
 import {
@@ -35,9 +35,6 @@ import {
   isValidPlaylistId,
   timingSafeEqual,
   getClientIp,
-  hourBucket,
-  dayBucket,
-  rateLimitKey,
 } from "./security.js";
 
 // إعادة تصدير للتوافق مع الإصدار الأول (كان extractPlaylistId يُصدَّر من هنا).
@@ -48,6 +45,51 @@ const MAX_MANUAL_TEXT_BYTES = 500 * 1024;
 const MAX_EPISODES_PER_SERIES = 500;
 const RATE_LIMIT_PER_IP_PER_HOUR = 15;
 const RATE_LIMIT_GLOBAL_PER_DAY = 500;
+const MAX_ADMIN_REQUEST_BYTES = 16 * 1024;
+const RATE_LIMITER_OBJECT_NAME = "anidoa-global-translation-budget-v1";
+
+async function readJsonBody(request, maxBytes) {
+  const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : MAX_ADMIN_REQUEST_BYTES;
+  const declaredLength = Number(request.headers.get("content-length") || 0);
+  if (declaredLength > limit) {
+    return { ok: false, status: 413, error: "حجم الطلب أكبر من الحد المسموح." };
+  }
+  const contentType = request.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return { ok: false, status: 415, error: "يجب إرسال البيانات بصيغة JSON." };
+  }
+  if (!request.body) return { ok: false, status: 400, error: "بيانات الطلب فارغة." };
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, status: 413, error: "حجم الطلب أكبر من الحد المسموح." };
+      }
+      chunks.push(part.value);
+    }
+  } catch (e) {
+    return { ok: false, status: 400, error: "تعذّرت قراءة بيانات الطلب." };
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return { ok: true, value: JSON.parse(new TextDecoder().decode(bytes)) };
+  } catch (e) {
+    return { ok: false, status: 400, error: "بيانات JSON غير صالحة." };
+  }
+}
 
 function jsonResponse(data, status, extraHeaders) {
   const response = new Response(JSON.stringify(data), {
@@ -114,76 +156,65 @@ async function kvDelete(env, key) {
   await env.ANIDOA_KV.delete(key);
 }
 
-function secondsUntilHourEnd(now) {
-  const d = now || new Date();
-  return 3600 - (d.getUTCMinutes() * 60 + d.getUTCSeconds());
-}
-
-function secondsUntilDayEnd(now) {
-  const d = now || new Date();
-  return 86400 - (d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds());
-}
-
-async function readCounter(env, key) {
-  if (!env || !env.ANIDOA_KV) return 0;
-  try {
-    const raw = await env.ANIDOA_KV.get(key);
-    const n = parseInt(raw || "0", 10);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  } catch (e) {
-    console.error("[AniDoa] Rate-limit read failed for " + key + ":", e && e.message);
-    return 0;
-  }
-}
-
-async function incrementCounter(env, key, expirationTtl) {
-  if (!env || !env.ANIDOA_KV) return;
-  const current = await readCounter(env, key);
-  try {
-    await env.ANIDOA_KV.put(key, String(current + 1), { expirationTtl });
-  } catch (e) {
-    console.error("[AniDoa] Rate-limit write failed for " + key + ":", e && e.message);
-  }
-}
-
 /**
- * حد تقريبي لطلبات الترجمة غير المخزّنة (سحب+ترجمة جديدة وترجمة يدوية):
- * 15 طلباً/ساعة لكل IP و 500 طلب/يوم إجمالاً للمنصة.
- * الترجمات المخزنة في KV تتجاوز الحد تماماً (لا تُحسب ولا تُفحص).
- *
- * تحذير — الحد تقريبي وليس صارماً: Cloudflare KV متسق في النهاية
- * (eventually consistent) وقد تتسابق الزيادات المتزامنة من مناطق مختلفة
- * فتضيع بعض الزيادات، وقد تتأخر القراءة عن الكتابة. هذا كافٍ لتقليل
- * إساءة الاستخدام والتكاليف، لكنه لا يضمن حداً دقيقاً بالوحدة.
+ * الحد يتم داخل Durable Object واحد يستخدم SQLite ومعاملة ذرية:
+ * 15 طلب ترجمة/ساعة لكل IP، و500 طلب/يوم للمنصة.
+ * الترجمات المحفوظة في KV تتجاوز الحد لأنها لا تستدعي هذه الدالة.
+ * إذا كان ربط DO غير متاح نوقف الترجمة حفاظًا على رصيد Gemini.
  */
-async function checkRateLimit(env, request) {
-  if (!env || !env.ANIDOA_KV) return { allowed: true };
-  const now = new Date();
-  const ip = getClientIp(request);
-  const ipKey = rateLimitKey("rl", ip, hourBucket(now));
-  const globalKey = rateLimitKey("rl", "global", dayBucket(now));
-  const ipCount = await readCounter(env, ipKey);
-  if (ipCount >= RATE_LIMIT_PER_IP_PER_HOUR) {
-    return { allowed: false, scope: "ip", retryAfter: secondsUntilHourEnd(now) };
+async function checkRateLimit(env, request, videoId) {
+  const namespace = env && env.ANIDOA_RATE_LIMITER;
+  if (!namespace || typeof namespace.getByName !== "function") {
+    return { allowed: false, scope: "storage", retryAfter: 60 };
   }
-  const globalCount = await readCounter(env, globalKey);
-  if (globalCount >= RATE_LIMIT_GLOBAL_PER_DAY) {
-    return { allowed: false, scope: "global", retryAfter: secondsUntilDayEnd(now) };
+
+  try {
+    const limiter = namespace.getByName(RATE_LIMITER_OBJECT_NAME);
+    return await limiter.claimTranslation(
+      getClientIp(request),
+      videoId,
+      new Date().toISOString(),
+      RATE_LIMIT_PER_IP_PER_HOUR,
+      RATE_LIMIT_GLOBAL_PER_DAY
+    );
+  } catch (e) {
+    console.error("[AniDoa] Durable rate limiter unavailable:", e && e.message);
+    return { allowed: false, scope: "storage", retryAfter: 60 };
   }
-  await incrementCounter(env, ipKey, 3600);
-  await incrementCounter(env, globalKey, 86400);
-  return { allowed: true };
+}
+
+async function releaseRateLimit(env, videoId) {
+  const namespace = env && env.ANIDOA_RATE_LIMITER;
+  if (!namespace || typeof namespace.getByName !== "function") return;
+  try {
+    const limiter = namespace.getByName(RATE_LIMITER_OBJECT_NAME);
+    await limiter.releaseTranslation(videoId);
+  } catch (e) {
+    console.error("[AniDoa] Failed to release translation reservation:", e && e.message);
+  }
 }
 
 function rateLimitResponse(result) {
   const message =
     result.scope === "global"
       ? "تم تجاوز الحد اليومي العام للترجمة (500 طلب/يوم). حاول مجدداً غداً."
-      : "تم تجاوز حد الترجمة المؤقت (15 طلب ترجمة/ساعة). حاول بعد قليل.";
+      : result.scope === "storage"
+        ? "نظام حماية الترجمة غير متاح حاليًا. أوقفنا الطلب لحماية رصيد Gemini؛ حاول بعد دقيقة."
+        : result.scope === "in_progress"
+          ? "الترجمة لهذه الحلقة قيد التنفيذ بالفعل. انتظر قليلًا ثم حدّث الصفحة."
+          : "تم تجاوز حد الترجمة المؤقت (15 طلب ترجمة/ساعة). حاول بعد قليل.";
+  const status =
+    result.scope === "storage" ? 503 : result.scope === "in_progress" ? 409 : 429;
+  const code =
+    result.scope === "storage"
+      ? "STORAGE_UNAVAILABLE"
+      : result.scope === "in_progress"
+        ? "TRANSLATION_IN_PROGRESS"
+        : "RATE_LIMITED";
   return errorResponse(
     message,
-    429,
-    { code: "RATE_LIMITED", retryAfter: result.retryAfter },
+    status,
+    { code, retryAfter: result.retryAfter },
     { "Retry-After": String(result.retryAfter) }
   );
 }
@@ -228,7 +259,7 @@ async function fetchPlaylistTitle(playlistId, apiKey) {
     encodeURIComponent(playlistId) +
     "&key=" +
     encodeURIComponent(apiKey);
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  const response = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 15000);
   if (!response.ok) {
     if (response.status === 403) {
       throw new Error("تم رفض طلب YouTube (403). تحقق من مفتاح YOUTUBE_API_KEY أو رصيد الحصة اليومية (Quota).");
@@ -267,7 +298,7 @@ async function fetchPlaylistEpisodes(playlistId, apiKey) {
       "&key=" +
       encodeURIComponent(apiKey);
     if (pageToken) url += "&pageToken=" + encodeURIComponent(pageToken);
-    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    const response = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 15000);
     if (!response.ok) {
       if (response.status === 403) {
         throw new Error("تم رفض طلب YouTube (403). قد تكون حصة YouTube API اليومية قد انتهت — حاول لاحقاً.");
@@ -355,12 +386,9 @@ async function fetchAndStoreSeries(playlistId, env) {
 }
 
 async function handleAddSeries(request, env) {
-  let body;
-  try {
-    body = await request.json();
-  } catch (e) {
-    return errorResponse("بيانات الطلب غير صالحة — أرسل JSON صحيحاً.", 400);
-  }
+  const parsed = await readJsonBody(request, MAX_ADMIN_REQUEST_BYTES);
+  if (!parsed.ok) return errorResponse(parsed.error, parsed.status);
+  const body = parsed.value;
   const admin = requireAdmin(request, env, body && body.adminSecret);
   if (!admin.ok) return errorResponse(admin.error, 401);
   const playlistId = extractPlaylistId((body && (body.playlistUrl || body.playlistId)) || "");
@@ -398,12 +426,9 @@ async function handleDeleteSeries(request, env, url) {
 }
 
 async function handleRefreshSeries(request, env) {
-  let body;
-  try {
-    body = await request.json();
-  } catch (e) {
-    return errorResponse("بيانات الطلب غير صالحة — أرسل JSON صحيحاً.", 400);
-  }
+  const parsed = await readJsonBody(request, MAX_ADMIN_REQUEST_BYTES);
+  if (!parsed.ok) return errorResponse(parsed.error, parsed.status);
+  const body = parsed.value;
   const admin = requireAdmin(request, env, body && body.adminSecret);
   if (!admin.ok) return errorResponse(admin.error, 401);
   const playlistId = extractPlaylistId((body && (body.playlistUrl || body.playlistId)) || "");
@@ -449,8 +474,6 @@ async function handleGetSubtitles(request, env, url) {
       subtitles: cached.subtitles,
     });
   }
-  const limit = await checkRateLimit(env, request);
-  if (!limit.allowed) return rateLimitResponse(limit);
   let english;
   try {
     english = await getEnglishSubtitles(videoId, env);
@@ -465,34 +488,45 @@ async function handleGetSubtitles(request, env, url) {
     console.error("[AniDoa] Subtitle fetch failed:", e && e.message);
     return errorResponse("تعذّر سحب ترجمة الحلقة. حاول مرة أخرى.", 502);
   }
-  let translated;
+  const limit = await checkRateLimit(env, request, videoId);
+  if (!limit.allowed) return rateLimitResponse(limit);
+
   try {
-    translated = await translateSubtitles(english.cues, env);
+    const translated = await translateSubtitles(english.cues, env);
+    const record = {
+      videoId,
+      source: english.source,
+      translatedAt: new Date().toISOString(),
+      subtitles: translated,
+    };
+    let cacheSaved = true;
+    try {
+      await kvPutJson(env, "sub:" + videoId, record);
+    } catch (e) {
+      cacheSaved = false;
+      console.error("[AniDoa] KV subtitle cache failed:", e && e.message);
+    }
+    return jsonResponse({
+      videoId,
+      source: english.source,
+      cached: false,
+      cacheSaved,
+      translatedAt: record.translatedAt,
+      subtitles: translated,
+    });
   } catch (e) {
     console.error("[AniDoa] Translation failed:", e && e.message);
     return errorResponse(e.message || "فشلت ترجمة الحلقة. حاول مرة أخرى.", 502);
+  } finally {
+    // Keep the reservation until the translated subtitles are persisted.
+    await releaseRateLimit(env, videoId);
   }
-  const record = {
-    videoId,
-    source: english.source,
-    translatedAt: new Date().toISOString(),
-    subtitles: translated,
-  };
-  try {
-    await kvPutJson(env, "sub:" + videoId, record);
-  } catch (e) {
-    console.error("[AniDoa] KV subtitle cache failed:", e && e.message);
-  }
-  return jsonResponse({ videoId, source: english.source, cached: false, translatedAt: record.translatedAt, subtitles: translated });
 }
 
 async function handleTranslateManual(request, env) {
-  let body;
-  try {
-    body = await request.json();
-  } catch (e) {
-    return errorResponse("بيانات الطلب غير صالحة.", 400);
-  }
+  const parsed = await readJsonBody(request, MAX_MANUAL_TEXT_BYTES + 16 * 1024);
+  if (!parsed.ok) return errorResponse(parsed.error, parsed.status);
+  const body = parsed.value;
   const videoId = body && body.videoId;
   const playlistId = body && body.playlistId;
   const srtText = body && (body.srtText || body.text || "");
@@ -503,6 +537,24 @@ async function handleTranslateManual(request, env) {
   if (!admin.ok) return errorResponse(admin.error, 403, { code: "FORBIDDEN" });
   const membership = await requireLibraryEpisode(env, playlistId, videoId);
   if (membership.errorResponse) return membership.errorResponse;
+
+  // Reuse a ready translation unless the administrator explicitly forces a replacement.
+  const existingTranslation = await kvGetJson(env, "sub:" + videoId);
+  if (
+    body.force !== true &&
+    existingTranslation &&
+    Array.isArray(existingTranslation.subtitles) &&
+    existingTranslation.subtitles.length > 0
+  ) {
+    return jsonResponse({
+      videoId,
+      source: existingTranslation.source || "cache",
+      cached: true,
+      translatedAt: existingTranslation.translatedAt || null,
+      subtitles: existingTranslation.subtitles,
+    });
+  }
+
   if (!srtText || typeof srtText !== "string" || srtText.trim().length < 10) {
     return errorResponse("نص الترجمة فارغ أو قصير جداً. الصق ملف ترجمة كاملاً.", 400);
   }
@@ -519,27 +571,38 @@ async function handleTranslateManual(request, env) {
   if (cues.length === 0) {
     return errorResponse("تعذّر فهم ملف الترجمة. تأكد أنه بصيغة SRT أو VTT صحيحة.", 400);
   }
-  const limit = await checkRateLimit(env, request);
+  const limit = await checkRateLimit(env, request, videoId);
   if (!limit.allowed) return rateLimitResponse(limit);
-  let translated;
   try {
-    translated = await translateSubtitles(cues, env);
+    const translated = await translateSubtitles(cues, env);
+    const record = {
+      videoId,
+      source: "manual",
+      translatedAt: new Date().toISOString(),
+      subtitles: translated,
+    };
+    let cacheSaved = true;
+    try {
+      await kvPutJson(env, "sub:" + videoId, record);
+    } catch (e) {
+      cacheSaved = false;
+      console.error("[AniDoa] KV manual cache failed:", e && e.message);
+    }
+    return jsonResponse({
+      videoId,
+      source: "manual",
+      cached: false,
+      cacheSaved,
+      translatedAt: record.translatedAt,
+      subtitles: translated,
+    });
   } catch (e) {
     console.error("[AniDoa] Manual translation failed:", e && e.message);
     return errorResponse(e.message || "فشلت ترجمة الملف المرفوع.", 502);
+  } finally {
+    // Keep the reservation until the translated subtitles are persisted.
+    await releaseRateLimit(env, videoId);
   }
-  const record = {
-    videoId,
-    source: "manual",
-    translatedAt: new Date().toISOString(),
-    subtitles: translated,
-  };
-  try {
-    await kvPutJson(env, "sub:" + videoId, record);
-  } catch (e) {
-    console.error("[AniDoa] KV manual cache failed:", e && e.message);
-  }
-  return jsonResponse({ videoId, source: "manual", cached: false, translatedAt: record.translatedAt, subtitles: translated });
 }
 
 async function handleHome(env) {
@@ -580,8 +643,21 @@ async function handleWatch(env, url) {
   if (episodes.length === 0) {
     return htmlResponse(renderErrorPage("المسلسل بلا حلقات", "قائمة التشغيل فارغة."), 404);
   }
-  let episode = episodes.find((ep) => ep.videoId === videoId);
-  if (!episode) episode = episodes[0];
+  let episode = null;
+  if (videoId) {
+    if (!isValidVideoId(videoId)) {
+      return htmlResponse(renderErrorPage("رابط الحلقة غير صالح", "اختر حلقة من قائمة حلقات المسلسل."), 400);
+    }
+    episode = episodes.find((ep) => ep.videoId === videoId) || null;
+    if (!episode) {
+      return htmlResponse(
+        renderErrorPage("الحلقة غير موجودة", "هذه الحلقة ليست ضمن حلقات المسلسل في مكتبة AniDoa."),
+        404
+      );
+    }
+  } else {
+    episode = episodes[0];
+  }
   return htmlResponse(renderWatchPage(series, episode, episodes));
 }
 
@@ -602,13 +678,29 @@ export default {
         } catch (e) {
           kvStatus = "error";
         }
-        return jsonResponse({
-          ok: true,
-          service: "anidoa",
-          kv: kvStatus,
-          model: getActiveModel(env),
-          time: new Date().toISOString(),
-        });
+        const configuration = {
+          youtube: !!(env && env.YOUTUBE_API_KEY),
+          gemini: !!(env && env.GEMINI_API_KEY),
+          admin: !!(env && env.ADMIN_SECRET),
+          rateLimiter: !!(env && env.ANIDOA_RATE_LIMITER),
+        };
+        const ready =
+          kvStatus === "ok" &&
+          configuration.youtube &&
+          configuration.gemini &&
+          configuration.admin &&
+          configuration.rateLimiter;
+        return jsonResponse(
+          {
+            ok: ready,
+            service: "anidoa",
+            kv: kvStatus,
+            configuration,
+            model: getActiveModel(env),
+            time: new Date().toISOString(),
+          },
+          ready ? 200 : 503
+        );
       }
 
       if (path === "/robots.txt" && method === "GET") {
