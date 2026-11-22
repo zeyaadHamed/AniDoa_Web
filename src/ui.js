@@ -5,6 +5,8 @@
  * الألوان: خلفية #0B0F19، كروت #151C2C، أساسي #10B981، ثانوي #F59E0B.
  */
 
+import { findActiveCue, cuesToSrt, sortCues } from "./cues.js";
+
 export function escapeHtml(value) {
   return String(value == null ? "" : value)
     .replace(/&/g, "&amp;")
@@ -143,6 +145,7 @@ function layout(title, bodyHtml, extraScript) {
     '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
     "<title>" + escapeHtml(title) + " | AniDoa</title>\n" +
     '<meta name="description" content="AniDoa — مشاهدة الدونغهوا (الأنمي الصيني) بترجمة عربية احترافية بالذكاء الاصطناعي.">\n' +
+    '<link rel="icon" href="/favicon.svg" type="image/svg+xml">\n' +
     '<link rel="preconnect" href="https://fonts.googleapis.com">\n' +
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n' +
     '<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet">\n' +
@@ -180,6 +183,7 @@ export function renderHome(seriesList) {
         '<div class="card-body">' +
         '<div class="card-title">' + escapeHtml(s.title || "مسلسل بدون عنوان") + "</div>" +
         '<div class="card-meta"><span>📺 ' + (s.episodeCount || 0) + " حلقة</span>" +
+        (s.truncated ? '<span class="badge">أول 500 حلقة</span>' : "") +
         '<span class="continue-badge" data-continue-for="' + escapeHtml(s.playlistId) + '"></span></div>' +
         '<div class="card-actions">' +
         '<a class="btn small" href="/watch?playlist=' + encodeURIComponent(s.playlistId) + '">مشاهدة</a>' +
@@ -317,6 +321,9 @@ export function renderWatchPage(series, episode, episodes) {
     '<a class="btn small ghost" href="/" style="margin-top:16px;display:inline-block">← العودة إلى المكتبة</a>' +
     '<h1 class="watch-title">' + escapeHtml(series.title || "مسلسل") + "</h1>" +
     '<p class="watch-sub">الحلقة ' + (safeIndex + 1) + " من " + eps.length + " — " + escapeHtml(episode.title || "") + "</p>" +
+    (series.truncated
+      ? '<div class="alert info show" style="margin-top:12px">تم عرض أول 500 حلقة فقط من هذا المسلسل (الحد الأقصى للحلقات المحفوظة لكل مسلسل).</div>'
+      : "") +
     '<div class="player-wrap"><div id="yt-player"></div>' +
     '<div class="subtitle-overlay" id="subtitleOverlay" aria-live="off"><span id="subtitleText" style="display:none"></span></div></div>' +
     '<div id="subStatus" class="alert info show" style="margin-top:12px"><span class="spinner"></span> جارٍ تحميل الترجمة العربية...</div>' +
@@ -336,6 +343,8 @@ export function renderWatchPage(series, episode, episodes) {
     '<span class="sync-value" id="syncLabel">0.0s</span>' +
     '<button class="chip" id="syncPlus" type="button">+ 0.5 ثانية</button>' +
     '<button class="chip" id="syncReset" type="button">إعادة ضبط</button></div>' +
+    '<div class="controls-row"><span class="controls-label">الترجمة العربية</span>' +
+    '<button class="chip" id="downloadSrtBtn" type="button" disabled>تحميل الترجمة (.srt)</button></div>' +
     '<div class="controls-row"><label class="checkbox-row"><input type="checkbox" id="autoNext" checked> تشغيل الحلقة التالية تلقائياً عند الانتهاء</label></div>' +
     "</div>" +
     '<div class="ep-nav">' +
@@ -354,6 +363,9 @@ export function renderWatchPage(series, episode, episodes) {
     '<input class="file-input" id="srtFile" type="file" accept=".srt,.vtt,text/plain"></div>' +
     '<div class="field"><label for="srtText">أو الصق نص الترجمة هنا</label>' +
     '<textarea id="srtText" dir="ltr" placeholder="1&#10;00:00:01,000 --> 00:00:03,000&#10;Hello world..."></textarea></div>' +
+    '<div class="field"><label for="manualAdminSecret">كلمة سر المدير</label>' +
+    '<input id="manualAdminSecret" type="password" placeholder="ADMIN_SECRET" autocomplete="off">' +
+    '<div class="hint">الترجمة اليدوية محمية بكلمة سر المدير، ولا تُحفظ كلمة السر في أي مكان.</div></div>' +
     '<button class="btn secondary" type="button" id="manualBtn">ترجم الآن</button>' +
     "</div>" +
     '<section class="episodes"><h2>كل الحلقات (' + eps.length + ")</h2>" +
@@ -366,6 +378,12 @@ export function renderWatchPage(series, episode, episodes) {
     "var CURRENT_INDEX = " + safeIndex + ";\n" +
     "var CURRENT_VIDEO_ID = " + safeJsonForHtml(episode.videoId) + ";\n" +
     "var subtitles = [];\n" +
+    "var lastCueIndex = -1;\n" +
+    "var rateLimitTimer = null;\n" +
+    // دوال cues.js مكتفية ذاتياً — نضمّنها في سكربت المشغل عبر .toString().
+    "var findActiveCue = " + findActiveCue.toString() + ";\n" +
+    "var cuesToSrt = " + cuesToSrt.toString() + ";\n" +
+    "var sortCues = " + sortCues.toString() + ";\n" +
     "var player = null;\n" +
     "var syncTimer = null;\n" +
     "var PREFS_KEY = 'anidoa_sub_prefs';\n" +
@@ -415,39 +433,85 @@ export function renderWatchPage(series, episode, episodes) {
     "  document.getElementById('colorWhite').classList.toggle('active', prefs.color === '#FFFFFF');\n" +
     "  document.getElementById('colorYellow').classList.toggle('active', prefs.color === '#FDE047');\n" +
     "}\n" +
-    "function currentCueText(time) {\n" +
-    "  var t = time + prefs.offset;\n" +
-    "  for (var i = 0; i < subtitles.length; i++) {\n" +
-    "    if (t >= subtitles[i].start && t <= subtitles[i].end) return subtitles[i].text;\n" +
-    "  }\n" +
-    "  return '';\n" +
-    "}\n" +
     "function tickSubtitles() {\n" +
     "  if (!player || typeof player.getCurrentTime !== 'function') return;\n" +
     "  var textEl = document.getElementById('subtitleText');\n" +
     "  var time = 0;\n" +
     "  try { time = player.getCurrentTime() || 0; } catch (e) { return; }\n" +
-    "  var text = currentCueText(time);\n" +
+    "  var res = findActiveCue(subtitles, time + prefs.offset, lastCueIndex);\n" +
+    "  lastCueIndex = res.index;\n" +
+    "  var text = res.cue ? res.cue.text : '';\n" +
     "  if (text) { textEl.textContent = text; textEl.style.display = 'inline-block'; }\n" +
     "  else { textEl.textContent = ''; textEl.style.display = 'none'; }\n" +
     "}\n" +
+    "function startRateLimitCountdown(seconds, baseMsg) {\n" +
+    "  var remaining = seconds;\n" +
+    "  if (rateLimitTimer) clearInterval(rateLimitTimer);\n" +
+    "  function renderCountdown() {\n" +
+    "    var el = document.getElementById('subStatus');\n" +
+    "    el.className = 'alert show info';\n" +
+    "    el.style.display = '';\n" +
+    "    el.innerHTML = '';\n" +
+    "    var span = document.createElement('span');\n" +
+    "    span.textContent = baseMsg + ' حاول بعد ' + remaining + ' ثانية.';\n" +
+    "    el.appendChild(span);\n" +
+    "    if (remaining <= 0) {\n" +
+    "      var btn = document.createElement('button');\n" +
+    "      btn.className = 'btn small secondary';\n" +
+    "      btn.style.marginInlineStart = '10px';\n" +
+    "      btn.textContent = 'إعادة المحاولة';\n" +
+    "      btn.onclick = function () { loadSubtitles(true); };\n" +
+    "      el.appendChild(btn);\n" +
+    "    }\n" +
+    "  }\n" +
+    "  renderCountdown();\n" +
+    "  rateLimitTimer = setInterval(function () {\n" +
+    "    remaining--;\n" +
+    "    if (remaining <= 0) { remaining = 0; clearInterval(rateLimitTimer); rateLimitTimer = null; }\n" +
+    "    renderCountdown();\n" +
+    "  }, 1000);\n" +
+    "}\n" +
     "async function loadSubtitles(isRetry) {\n" +
     "  var statusEl = document.getElementById('subStatus');\n" +
+    "  if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }\n" +
     "  statusEl.className = 'alert info show';\n" +
+    "  statusEl.style.display = '';\n" +
     "  statusEl.innerHTML = '<span class=\\'spinner\\'></span> جارٍ تحميل الترجمة العربية...';\n" +
     "  document.getElementById('manualBox').style.display = 'none';\n" +
     "  subtitles = [];\n" +
+    "  lastCueIndex = -1;\n" +
+    "  document.getElementById('downloadSrtBtn').disabled = true;\n" +
     "  try {\n" +
-    "    var res = await fetch('/api/subtitles?videoId=' + encodeURIComponent(CURRENT_VIDEO_ID));\n" +
+    "    var res = await fetch('/api/subtitles?videoId=' + encodeURIComponent(CURRENT_VIDEO_ID) + '&playlist=' + encodeURIComponent(PLAYLIST_ID));\n" +
     "    var data = await res.json().catch(function () { return {}; });\n" +
+    "    if (res.status === 429) {\n" +
+    "      var retryAfter = parseInt(res.headers.get('Retry-After') || '60', 10) || 60;\n" +
+    "      startRateLimitCountdown(retryAfter, (data && data.error) || 'تم تجاوز حد الترجمة المؤقت.');\n" +
+    "      return;\n" +
+    "    }\n" +
+    "    if (res.status === 404 && data && data.code === 'NOT_IN_LIBRARY') {\n" +
+    "      showStatus('الحلقة غير موجودة في مكتبة AniDoa.', 'error', false);\n" +
+    "      var homeLink = document.createElement('a');\n" +
+    "      homeLink.className = 'btn small ghost';\n" +
+    "      homeLink.style.marginInlineStart = '10px';\n" +
+    "      homeLink.href = '/';\n" +
+    "      homeLink.textContent = 'العودة إلى المكتبة';\n" +
+    "      document.getElementById('subStatus').appendChild(homeLink);\n" +
+    "      return;\n" +
+    "    }\n" +
     "    if (res.status === 404 && data && data.code === 'NO_SUBTITLES') {\n" +
     "      showStatus('هذه الحلقة بدون ترجمة إنجليزية — قد تكون مترجمة داخل الفيديو (Hardsub). يمكنك رفع ملف ترجمة بالأسفل.', 'info', false);\n" +
     "      document.getElementById('manualBox').style.display = '';\n" +
     "      return;\n" +
     "    }\n" +
+    "    if (res.status === 400) {\n" +
+    "      showStatus((data && data.error) || 'بيانات الطلب غير صالحة.', 'error', false);\n" +
+    "      return;\n" +
+    "    }\n" +
     "    if (!res.ok) throw new Error((data && data.error) || 'تعذّر تحميل الترجمة.');\n" +
-    "    subtitles = Array.isArray(data.subtitles) ? data.subtitles : [];\n" +
+    "    subtitles = sortCues(Array.isArray(data.subtitles) ? data.subtitles : []);\n" +
     "    if (subtitles.length === 0) throw new Error('الترجمة المترجمة فارغة.');\n" +
+    "    document.getElementById('downloadSrtBtn').disabled = false;\n" +
     "    showStatus('تم تحميل الترجمة العربية بنجاح (' + subtitles.length + ' سطراً).', 'success', false);\n" +
     "    setTimeout(function () { document.getElementById('subStatus').style.display = 'none'; }, 3500);\n" +
     "  } catch (err) {\n" +
@@ -494,19 +558,38 @@ export function renderWatchPage(series, episode, episodes) {
     "  var btn = document.getElementById('manualBtn');\n" +
     "  var alertEl = document.getElementById('manualAlert');\n" +
     "  var text = document.getElementById('srtText').value.trim();\n" +
+    "  var secret = document.getElementById('manualAdminSecret').value;\n" +
     "  if (!text || text.length < 10) { alertEl.textContent = 'الصق نص ترجمة كاملاً أو ارفع ملف .srt أولاً.'; alertEl.className = 'alert show error'; return; }\n" +
+    "  if (!secret) { alertEl.textContent = 'أدخل كلمة سر المدير لترجمة الملف.'; alertEl.className = 'alert show error'; return; }\n" +
     "  btn.disabled = true; btn.textContent = 'جارٍ ترجمة الملف...';\n" +
     "  alertEl.textContent = 'جارٍ ترجمة الملف بالذكاء الاصطناعي — قد يستغرق هذا دقيقة.'; alertEl.className = 'alert show info';\n" +
     "  try {\n" +
-    "    var res = await fetch('/api/translate-manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ videoId: CURRENT_VIDEO_ID, srtText: text }) });\n" +
+    "    var res = await fetch('/api/translate-manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ videoId: CURRENT_VIDEO_ID, playlistId: PLAYLIST_ID, srtText: text, adminSecret: secret }) });\n" +
     "    var data = await res.json().catch(function () { return {}; });\n" +
+    "    if (res.status === 403) throw new Error('كلمة سر المدير غير صحيحة.');\n" +
+    "    if (res.status === 429) { var ra = res.headers.get('Retry-After'); throw new Error((data.error || 'تم تجاوز حد الترجمة.') + (ra ? ' حاول بعد ' + ra + ' ثانية.' : '')); }\n" +
     "    if (!res.ok) throw new Error(data.error || 'فشلت ترجمة الملف.');\n" +
-    "    subtitles = Array.isArray(data.subtitles) ? data.subtitles : [];\n" +
+    "    subtitles = sortCues(Array.isArray(data.subtitles) ? data.subtitles : []);\n" +
+    "    lastCueIndex = -1;\n" +
+    "    document.getElementById('downloadSrtBtn').disabled = false;\n" +
     "    alertEl.textContent = 'تمت ترجمة الملف بنجاح (' + subtitles.length + ' سطراً).'; alertEl.className = 'alert show success';\n" +
     "    showStatus('تمت ترجمة الملف المرفوع بنجاح.', 'success', false);\n" +
     "  } catch (err) {\n" +
     "    alertEl.textContent = err.message || 'فشلت ترجمة الملف.'; alertEl.className = 'alert show error';\n" +
     "  } finally { btn.disabled = false; btn.textContent = 'ترجم الآن'; }\n" +
+    "});\n" +
+    "document.getElementById('downloadSrtBtn').addEventListener('click', function () {\n" +
+    "  if (!subtitles || subtitles.length === 0) return;\n" +
+    "  var srt = cuesToSrt(subtitles);\n" +
+    "  var blob = new Blob([srt], { type: 'text/plain;charset=utf-8' });\n" +
+    "  var url = URL.createObjectURL(blob);\n" +
+    "  var a = document.createElement('a');\n" +
+    "  a.href = url;\n" +
+    "  a.download = 'AniDoa-' + CURRENT_VIDEO_ID + '.srt';\n" +
+    "  document.body.appendChild(a);\n" +
+    "  a.click();\n" +
+    "  a.remove();\n" +
+    "  setTimeout(function () { URL.revokeObjectURL(url); }, 5000);\n" +
     "});\n" +
     "applyPrefs();\n" +
     "saveProgress();\n" +

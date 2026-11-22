@@ -12,8 +12,16 @@
 # وفعّل خيار Encrypt (Secret) لكل من:
 #   YOUTUBE_API_KEY  : مفتاح YouTube Data API v3 (مطلوب)
 #   GEMINI_API_KEY   : مفتاح Google Gemini (مطلوب للترجمة)
-#   ADMIN_SECRET     : كلمة سر إضافة المسلسلات (مطلوبة)
+#   ADMIN_SECRET     : كلمة سر إضافة المسلسلات والترجمة اليدوية (مطلوبة)
 #   SUPADATA_API_KEY : مفتاح Supadata (اختياري — مستوى احتياطي ثالث)
+#
+# متغيرات عادية (Vars — ليست Secrets، تُضبط من Settings ← Variables بدون Encrypt):
+#   GEMINI_MODEL     : نموذج الترجمة (اختياري — الافتراضي gemini-3.5-flash-lite)
+#
+# حدود الترجمة (Rate Limits) — لحماية رصيد Gemini ومنع إساءة الاستخدام:
+#   15 طلب ترجمة غير مخزّن/ساعة لكل IP، و 500 طلب/يوم إجمالاً للمنصة.
+#   الترجمات المخزنة في KV لا تُحسب ضمن الحد. الحد تقريبي لأن KV متسق
+#   في النهاية (eventually consistent) — انظر README قسم "نموذج الحماية".
 # ============================================================
 
 name = "anidoa"
@@ -35,4 +43,5 @@ preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
 # GEMINI_API_KEY   = "يُضبط كـ Secret"
 # ADMIN_SECRET     = "يُضبط كـ Secret"
 # SUPADATA_API_KEY = "يُضبط كـ Secret (اختياري)"
+# GEMINI_MODEL     = "gemini-3.5-flash-lite" (اختياري — Var عادي لتجاوز نموذج الترجمة)
 ENVIRONMENT = "production"
