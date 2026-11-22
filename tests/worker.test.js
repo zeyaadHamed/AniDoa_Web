@@ -65,6 +65,7 @@ test("health reports not-ready when required secrets are missing", async () => {
     youtube: false,
     gemini: false,
     admin: false,
+    rateLimiter: true,
   });
   assert.equal(response.headers.get("X-Frame-Options"), "DENY");
 });
