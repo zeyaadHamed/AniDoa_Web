@@ -240,7 +240,8 @@ test("translation fails closed when the Durable Object rate limiter is unavailab
     assert.equal(response.status, 503);
     assert.equal(body.code, "STORAGE_UNAVAILABLE");
     assert.equal(response.headers.get("Retry-After"), "60");
-    assert.equal(networkCalls, 0);
+    // The two requests above only retrieve English captions; no Gemini request is allowed.
+    assert.equal(networkCalls, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
