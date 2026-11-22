@@ -162,7 +162,7 @@ async function kvDelete(env, key) {
  * الترجمات المحفوظة في KV تتجاوز الحد لأنها لا تستدعي هذه الدالة.
  * إذا كان ربط DO غير متاح نوقف الترجمة حفاظًا على رصيد Gemini.
  */
-async function checkRateLimit(env, request) {
+async function checkRateLimit(env, request, videoId) {
   const namespace = env && env.ANIDOA_RATE_LIMITER;
   if (!namespace || typeof namespace.getByName !== "function") {
     return { allowed: false, scope: "storage", retryAfter: 60 };
@@ -170,8 +170,9 @@ async function checkRateLimit(env, request) {
 
   try {
     const limiter = namespace.getByName(RATE_LIMITER_OBJECT_NAME);
-    return await limiter.checkAndIncrement(
+    return await limiter.claimTranslation(
       getClientIp(request),
+      videoId,
       new Date().toISOString(),
       RATE_LIMIT_PER_IP_PER_HOUR,
       RATE_LIMIT_GLOBAL_PER_DAY
@@ -182,18 +183,38 @@ async function checkRateLimit(env, request) {
   }
 }
 
+async function releaseRateLimit(env, videoId) {
+  const namespace = env && env.ANIDOA_RATE_LIMITER;
+  if (!namespace || typeof namespace.getByName !== "function") return;
+  try {
+    const limiter = namespace.getByName(RATE_LIMITER_OBJECT_NAME);
+    await limiter.releaseTranslation(videoId);
+  } catch (e) {
+    console.error("[AniDoa] Failed to release translation reservation:", e && e.message);
+  }
+}
+
 function rateLimitResponse(result) {
   const message =
     result.scope === "global"
       ? "تم تجاوز الحد اليومي العام للترجمة (500 طلب/يوم). حاول مجدداً غداً."
       : result.scope === "storage"
-        ? "التخزين غير متاح حاليًا، لذلك أوقفنا طلب الترجمة مؤقتًا لحماية رصيد Gemini. حاول بعد دقيقة."
-        : "تم تجاوز حد الترجمة المؤقت (15 طلب ترجمة/ساعة). حاول بعد قليل.";
-  const status = result.scope === "storage" ? 503 : 429;
+        ? "نظام حماية الترجمة غير متاح حاليًا. أوقفنا الطلب لحماية رصيد Gemini؛ حاول بعد دقيقة."
+        : result.scope === "in_progress"
+          ? "الترجمة لهذه الحلقة قيد التنفيذ بالفعل. انتظر قليلًا ثم حدّث الصفحة."
+          : "تم تجاوز حد الترجمة المؤقت (15 طلب ترجمة/ساعة). حاول بعد قليل.";
+  const status =
+    result.scope === "storage" ? 503 : result.scope === "in_progress" ? 409 : 429;
+  const code =
+    result.scope === "storage"
+      ? "STORAGE_UNAVAILABLE"
+      : result.scope === "in_progress"
+        ? "TRANSLATION_IN_PROGRESS"
+        : "RATE_LIMITED";
   return errorResponse(
     message,
     status,
-    { code: result.scope === "storage" ? "STORAGE_UNAVAILABLE" : "RATE_LIMITED", retryAfter: result.retryAfter },
+    { code, retryAfter: result.retryAfter },
     { "Retry-After": String(result.retryAfter) }
   );
 }
@@ -453,8 +474,6 @@ async function handleGetSubtitles(request, env, url) {
       subtitles: cached.subtitles,
     });
   }
-  const limit = await checkRateLimit(env, request);
-  if (!limit.allowed) return rateLimitResponse(limit);
   let english;
   try {
     english = await getEnglishSubtitles(videoId, env);
@@ -469,12 +488,17 @@ async function handleGetSubtitles(request, env, url) {
     console.error("[AniDoa] Subtitle fetch failed:", e && e.message);
     return errorResponse("تعذّر سحب ترجمة الحلقة. حاول مرة أخرى.", 502);
   }
+  const limit = await checkRateLimit(env, request, videoId);
+  if (!limit.allowed) return rateLimitResponse(limit);
+
   let translated;
   try {
     translated = await translateSubtitles(english.cues, env);
   } catch (e) {
     console.error("[AniDoa] Translation failed:", e && e.message);
     return errorResponse(e.message || "فشلت ترجمة الحلقة. حاول مرة أخرى.", 502);
+  } finally {
+    await releaseRateLimit(env, videoId);
   }
   const record = {
     videoId,
@@ -540,7 +564,7 @@ async function handleTranslateManual(request, env) {
   if (cues.length === 0) {
     return errorResponse("تعذّر فهم ملف الترجمة. تأكد أنه بصيغة SRT أو VTT صحيحة.", 400);
   }
-  const limit = await checkRateLimit(env, request);
+  const limit = await checkRateLimit(env, request, videoId);
   if (!limit.allowed) return rateLimitResponse(limit);
   let translated;
   try {
@@ -548,6 +572,8 @@ async function handleTranslateManual(request, env) {
   } catch (e) {
     console.error("[AniDoa] Manual translation failed:", e && e.message);
     return errorResponse(e.message || "فشلت ترجمة الملف المرفوع.", 502);
+  } finally {
+    await releaseRateLimit(env, videoId);
   }
   const record = {
     videoId,
