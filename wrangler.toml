@@ -1,0 +1,38 @@
+# AniDoa — إعدادات Cloudflare Workers
+# ============================================================
+# كيف تنشئ KV وتربطه (من لوحة تحكم Cloudflare فقط، بدون أوامر):
+# 1) من Dashboard اذهب إلى Workers & Pages ← KV ← Create namespace باسم ANIDOA_KV
+# 2) انسخ الـ ID الخاص بالـ Namespace والصقه مكان REPLACE_WITH_KV_ID بالأسفل
+# 3) الـ Preview ID يمكن أن يكون نفس الـ ID أو Namespace ثانٍ للتجربة
+# 4) اربط الـ KV بالـ Worker من Settings ← Variables ← KV Namespace Bindings
+#    واختر Binding name = ANIDOA_KV
+#
+# الأسرار (Secrets) — تُضبط من Dashboard فقط:
+# Workers & Pages ← اختر Worker ← Settings ← Variables ← Add variable
+# وفعّل خيار Encrypt (Secret) لكل من:
+#   YOUTUBE_API_KEY  : مفتاح YouTube Data API v3 (مطلوب)
+#   GEMINI_API_KEY   : مفتاح Google Gemini (مطلوب للترجمة)
+#   ADMIN_SECRET     : كلمة سر إضافة المسلسلات (مطلوبة)
+#   SUPADATA_API_KEY : مفتاح Supadata (اختياري — مستوى احتياطي ثالث)
+# ============================================================
+
+name = "anidoa"
+main = "src/index.js"
+compatibility_date = "2024-10-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# ربط Cloudflare KV — استبدل القيمتين بالـ IDs الحقيقية من Dashboard
+[[kv_namespaces]]
+binding = "ANIDOA_KV"
+id = "REPLACE_WITH_KV_ID"
+preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
+
+[vars]
+# لا تضع المفاتيح السرية هنا أبداً — ضعها كـ Secrets من Dashboard.
+# هذه المتغيرات للتوثيق فقط:
+# YOUTUBE_API_KEY  = "يُضبط كـ Secret"
+# GEMINI_API_KEY   = "يُضبط كـ Secret"
+# ADMIN_SECRET     = "يُضبط كـ Secret"
+# SUPADATA_API_KEY = "يُضبط كـ Secret (اختياري)"
+ENVIRONMENT = "production"
