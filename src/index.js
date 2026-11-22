@@ -247,10 +247,11 @@ function rateLimitResponse(result) {
       : result.scope === "storage"
         ? "التخزين غير متاح حاليًا، لذلك أوقفنا طلب الترجمة مؤقتًا لحماية رصيد Gemini. حاول بعد دقيقة."
         : "تم تجاوز حد الترجمة المؤقت (15 طلب ترجمة/ساعة). حاول بعد قليل.";
+  const status = result.scope === "storage" ? 503 : 429;
   return errorResponse(
     message,
-    429,
-    { code: "RATE_LIMITED", retryAfter: result.retryAfter },
+    status,
+    { code: result.scope === "storage" ? "STORAGE_UNAVAILABLE" : "RATE_LIMITED", retryAfter: result.retryAfter },
     { "Retry-After": String(result.retryAfter) }
   );
 }
