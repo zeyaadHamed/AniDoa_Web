@@ -41,6 +41,8 @@ export class AniDoaRateLimiter extends DurableObject {
       // Keep only the current hour/day buckets so this database stays small.
       sql.exec("DELETE FROM ip_hour_limits WHERE bucket < ?", buckets.hour);
       sql.exec("DELETE FROM global_day_limits WHERE bucket < ?", buckets.day);
+      const staleBefore = new Date(nowMs - 5 * 60 * 1000).toISOString();
+      sql.exec("DELETE FROM active_translations WHERE started_at < ?", staleBefore);
 
       // Prevent concurrent requests for the same episode from spending twice.
       const activeRows = sql
