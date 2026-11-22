@@ -491,29 +491,36 @@ async function handleGetSubtitles(request, env, url) {
   const limit = await checkRateLimit(env, request, videoId);
   if (!limit.allowed) return rateLimitResponse(limit);
 
-  let translated;
   try {
-    translated = await translateSubtitles(english.cues, env);
+    const translated = await translateSubtitles(english.cues, env);
+    const record = {
+      videoId,
+      source: english.source,
+      translatedAt: new Date().toISOString(),
+      subtitles: translated,
+    };
+    let cacheSaved = true;
+    try {
+      await kvPutJson(env, "sub:" + videoId, record);
+    } catch (e) {
+      cacheSaved = false;
+      console.error("[AniDoa] KV subtitle cache failed:", e && e.message);
+    }
+    return jsonResponse({
+      videoId,
+      source: english.source,
+      cached: false,
+      cacheSaved,
+      translatedAt: record.translatedAt,
+      subtitles: translated,
+    });
   } catch (e) {
     console.error("[AniDoa] Translation failed:", e && e.message);
     return errorResponse(e.message || "فشلت ترجمة الحلقة. حاول مرة أخرى.", 502);
   } finally {
+    // Keep the reservation until the translated subtitles are persisted.
     await releaseRateLimit(env, videoId);
   }
-  const record = {
-    videoId,
-    source: english.source,
-    translatedAt: new Date().toISOString(),
-    subtitles: translated,
-  };
-  let cacheSaved = true;
-  try {
-    await kvPutJson(env, "sub:" + videoId, record);
-  } catch (e) {
-    cacheSaved = false;
-    console.error("[AniDoa] KV subtitle cache failed:", e && e.message);
-  }
-  return jsonResponse({ videoId, source: english.source, cached: false, cacheSaved, translatedAt: record.translatedAt, subtitles: translated });
 }
 
 async function handleTranslateManual(request, env) {
@@ -566,29 +573,36 @@ async function handleTranslateManual(request, env) {
   }
   const limit = await checkRateLimit(env, request, videoId);
   if (!limit.allowed) return rateLimitResponse(limit);
-  let translated;
   try {
-    translated = await translateSubtitles(cues, env);
+    const translated = await translateSubtitles(cues, env);
+    const record = {
+      videoId,
+      source: "manual",
+      translatedAt: new Date().toISOString(),
+      subtitles: translated,
+    };
+    let cacheSaved = true;
+    try {
+      await kvPutJson(env, "sub:" + videoId, record);
+    } catch (e) {
+      cacheSaved = false;
+      console.error("[AniDoa] KV manual cache failed:", e && e.message);
+    }
+    return jsonResponse({
+      videoId,
+      source: "manual",
+      cached: false,
+      cacheSaved,
+      translatedAt: record.translatedAt,
+      subtitles: translated,
+    });
   } catch (e) {
     console.error("[AniDoa] Manual translation failed:", e && e.message);
     return errorResponse(e.message || "فشلت ترجمة الملف المرفوع.", 502);
   } finally {
+    // Keep the reservation until the translated subtitles are persisted.
     await releaseRateLimit(env, videoId);
   }
-  const record = {
-    videoId,
-    source: "manual",
-    translatedAt: new Date().toISOString(),
-    subtitles: translated,
-  };
-  let cacheSaved = true;
-  try {
-    await kvPutJson(env, "sub:" + videoId, record);
-  } catch (e) {
-    cacheSaved = false;
-    console.error("[AniDoa] KV manual cache failed:", e && e.message);
-  }
-  return jsonResponse({ videoId, source: "manual", cached: false, cacheSaved, translatedAt: record.translatedAt, subtitles: translated });
 }
 
 async function handleHome(env) {
