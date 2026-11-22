@@ -195,9 +195,34 @@ test("translation fails closed when the Durable Object rate limiter is unavailab
   };
   const originalFetch = globalThis.fetch;
   let networkCalls = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (input) => {
     networkCalls++;
-    throw new Error("Network should not be called while rate-limit storage is unavailable");
+    const url = String(input);
+    if (url.includes("youtubei/v1/player")) {
+      return new Response(
+        JSON.stringify({
+          captions: {
+            playerCaptionsTracklistRenderer: {
+              captionTracks: [
+                { languageCode: "en", baseUrl: "https://captions.test/en" },
+              ],
+            },
+          },
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (url.includes("captions.test/en")) {
+      return new Response(
+        JSON.stringify({
+          events: [
+            { tStartMs: 1000, dDurationMs: 1200, segs: [{ utf8: "Hello from captions" }] },
+          ],
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+    throw new Error("Unexpected subtitle network URL: " + url);
   };
 
   try {
